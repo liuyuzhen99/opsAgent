@@ -1,0 +1,12 @@
+{
+  "type": "inspection",
+  "input": "巡检生产环境 WebLogic",
+  "id": "92107909-de04-42aa-bad9-3a81048d310f",
+  "status": "failed",
+  "result": {
+    "success": false,
+    "data": {},
+    "error": "配置缺失: platform_url 未设置"
+  },
+  "report": "任务类型：inspection\n执行状态：failed\n异常信息：配置缺失: platform_url 未设置\n建议操作：请补齐 RPA 平台地址、认证信息和流程映射后重试。"
+}

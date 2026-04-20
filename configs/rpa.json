@@ -1,0 +1,23 @@
+{
+  "provider": "yidao",
+  "execution_mode": "shadowbot_local",
+  "platform_url": "",
+  "timeout_seconds": 10,
+  "auth": {
+    "type": "bearer",
+    "token": ""
+  },
+  "inspection": {
+    "default_system": "WebLogic",
+    "default_env": "prod",
+    "flow_map": {
+      "WebLogic": "replace-with-your-shadowbot-robot-uuid"
+    }
+  },
+  "shadowbot": {
+    "executable_path": "D:\\Program Files\\ShadowBot\\ShadowBot.exe",
+    "robot_uuid": "replace-with-your-shadowbot-robot-uuid",
+    "command_timeout_seconds": 10,
+    "result_file": ""
+  }
+}

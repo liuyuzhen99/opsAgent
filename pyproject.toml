@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aiops-agent"
+version = "0.1.0"
+description = "AIOps Agent MVP Phase 1"
+readme = "codex.md"
+requires-python = ">=3.10"
+dependencies = ["anthropic>=0.40.0"]
+
+[project.scripts]
+aiops-agent = "aiops_agent.cli:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,2 @@
+[console_scripts]
+aiops-agent = aiops_agent.cli:main
