@@ -304,29 +304,6 @@ aiops-agent/
 ├── runtimes/
 ├── storage/
 └── configs/
-
-⸻
-
-八、开发里程碑
-
-Phase 1
-
-- CLI 输入
-- Agent 基本循环
-- 巡检工具接入
-
-Phase 2
-
-- Playwright 权限工具
-- 人工确认机制
-- 日志系统
-
-Phase 3
-
-- 知识库接入
-- 定时任务
-- 后台执行
-
 ⸻
 
 九、验收标准
