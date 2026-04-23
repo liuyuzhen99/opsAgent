@@ -69,7 +69,7 @@ class RPAConfig:
 
 
 @dataclass(slots=True)
-class AnthropicConfig:
+class LLMProviderConfig:
     provider: str = "anthropic"
     enabled: bool = False
     api_key: str = ""
@@ -79,6 +79,10 @@ class AnthropicConfig:
     timeout_seconds: int = 20
     max_retries: int = 2
     max_tokens: int = 512
+    temperature: float = 0.0
+    fallback_provider: str = ""
+    fallback_model: str = ""
+    role_models: dict[str, str] = field(default_factory=dict)
 
     @property
     def default_headers(self) -> dict[str, str]:
@@ -89,20 +93,33 @@ class AnthropicConfig:
         if not self.enabled:
             return
         errors: list[str] = []
-        if self.provider != "anthropic":
-            errors.append("LLM provider 必须为 anthropic")
+        if self.provider not in {"anthropic", "openai", "private"}:
+            errors.append("LLM provider 必须为 anthropic、openai 或 private")
         if not self.api_key:
-            errors.append("ANTHROPIC_API_KEY 未设置")
+            if self.provider == "anthropic":
+                errors.append("ANTHROPIC_API_KEY 未设置")
+            elif self.provider == "openai":
+                errors.append("OPENAI_API_KEY 未设置")
+            else:
+                errors.append("LLM API_KEY 未设置")
         if not self.model:
-            errors.append("ANTHROPIC_MODEL 未设置")
+            if self.provider == "anthropic":
+                errors.append("ANTHROPIC_MODEL 未设置")
+            elif self.provider == "openai":
+                errors.append("OPENAI_MODEL 未设置")
+            else:
+                errors.append("LLM MODEL 未设置")
         if self.timeout_seconds <= 0:
-            errors.append("Anthropic timeout_seconds 必须大于 0")
+            errors.append("LLM timeout_seconds 必须大于 0")
         if self.max_retries < 0:
-            errors.append("Anthropic max_retries 不能小于 0")
+            errors.append("LLM max_retries 不能小于 0")
         if self.max_tokens <= 0:
-            errors.append("Anthropic max_tokens 必须大于 0")
+            errors.append("LLM max_tokens 必须大于 0")
         if errors:
             raise ConfigError("；".join(errors))
+
+
+AnthropicConfig = LLMProviderConfig
 
 
 def load_rpa_config(config_path: str | None = None) -> RPAConfig:
@@ -144,7 +161,7 @@ def load_rpa_config(config_path: str | None = None) -> RPAConfig:
     )
 
 
-def load_anthropic_config(config_path: str | None = None) -> AnthropicConfig:
+def load_anthropic_config(config_path: str | None = None) -> LLMProviderConfig:
     resolved_path = Path(
         config_path or os.environ.get("AIOPS_LLM_CONFIG") or DEFAULT_ANTHROPIC_CONFIG_PATH
     )
@@ -180,7 +197,14 @@ def load_anthropic_config(config_path: str | None = None) -> AnthropicConfig:
     if os.environ.get("AIOPS_LLM_ENABLED"):
         enabled = os.environ["AIOPS_LLM_ENABLED"].lower() in {"1", "true", "yes", "on"}
 
-    return AnthropicConfig(
+    role_models = raw.get("role_models", {})
+    profiles = raw.get("profiles", {})
+    if not role_models and isinstance(profiles, dict):
+        default_profile = profiles.get("default", {})
+        if isinstance(default_profile, dict):
+            role_models = dict(default_profile.get("role_models", {}))
+
+    return LLMProviderConfig(
         provider=raw.get("provider", "anthropic"),
         enabled=bool(enabled),
         api_key=api_key,
@@ -190,13 +214,17 @@ def load_anthropic_config(config_path: str | None = None) -> AnthropicConfig:
         timeout_seconds=int(raw.get("timeout_seconds", 20)),
         max_retries=int(raw.get("max_retries", 2)),
         max_tokens=int(raw.get("max_tokens", 512)),
+        temperature=float(raw.get("temperature", 0.0)),
+        fallback_provider=raw.get("fallback_provider", ""),
+        fallback_model=raw.get("fallback_model", ""),
+        role_models=dict(role_models),
     )
 
 
-def load_llm_config(config_path: str | None = None) -> AnthropicConfig:
+def load_llm_config(config_path: str | None = None) -> LLMProviderConfig:
     return load_anthropic_config(config_path)
 
 
-def validate_startup_config(rpa_config: RPAConfig, anthropic_config: AnthropicConfig) -> None:
+def validate_startup_config(rpa_config: RPAConfig, anthropic_config: LLMProviderConfig) -> None:
     rpa_config.validate_for_startup()
     anthropic_config.validate_for_startup()

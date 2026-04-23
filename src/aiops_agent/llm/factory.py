@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from aiops_agent.config import AnthropicConfig
-from aiops_agent.llm.anthropic_provider import AnthropicLLMProvider
+from aiops_agent.config import LLMProviderConfig
 from aiops_agent.llm.base import BaseLLMProvider
+from aiops_agent.llm.langchain_provider import LangChainLLMProvider
 
 
-def create_llm_provider(config: AnthropicConfig) -> BaseLLMProvider:
-    if config.provider != "anthropic":
+def create_llm_provider(config: LLMProviderConfig) -> BaseLLMProvider:
+    if config.provider not in {"anthropic", "openai"}:
         raise ValueError(f"Unsupported LLM provider: {config.provider}")
-    return AnthropicLLMProvider(config)
+    return LangChainLLMProvider(config)

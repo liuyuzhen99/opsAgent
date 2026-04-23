@@ -18,6 +18,7 @@ class IntentParser:
     INSPECTION_KEYWORDS = ("巡检", "检查", "inspect", "inspection")
     PERMISSION_KEYWORDS = ("权限", "授权", "permission", "grant")
     QA_KEYWORDS = ("怎么", "如何", "why", "what", "知识库", "sop")
+    WEB_ACTION_KEYWORDS = ("网页", "浏览器", "页面自动化", "click", "form")
 
     def __init__(
         self,
@@ -75,6 +76,15 @@ class IntentParser:
         if any(keyword in lowered for keyword in self.PERMISSION_KEYWORDS):
             return IntentResult(
                 intent="permission_change",
+                entities={"raw_text": normalized},
+            )
+
+        if any(keyword in lowered for keyword in self.QA_KEYWORDS):
+            return IntentResult(intent="ops_qa", entities={"raw_text": normalized})
+
+        if any(keyword in lowered for keyword in self.WEB_ACTION_KEYWORDS):
+            return IntentResult(
+                intent="web_action",
                 entities={"raw_text": normalized},
             )
 

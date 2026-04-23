@@ -14,10 +14,12 @@ from aiops_agent.config import (
     validate_startup_config,
 )
 from aiops_agent.llm.client import create_llm_provider
+from aiops_agent.storage.session_store import FileSessionStore
 from aiops_agent.storage.task_store import FileTaskStore
 from aiops_agent.support.logging import configure_logging, get_logger, log_kv
 from aiops_agent.support.trace import generate_trace_id, set_trace_id
 from aiops_agent.tasks.manager import TaskManager
+from aiops_agent.tools.executor import ToolExecutor
 from aiops_agent.tools.inspection import InspectionTool
 from aiops_agent.tools.registry import ToolRegistry
 
@@ -44,6 +46,25 @@ def build_parser() -> argparse.ArgumentParser:
         default="INFO",
         help="Runtime log level",
     )
+    run_parser.add_argument("--session-id", dest="session_id", help="Optional session ID")
+    run_parser.add_argument(
+        "--llm-profile",
+        dest="llm_profile",
+        help="Optional LLM profile name",
+    )
+    run_parser.add_argument(
+        "--max-steps",
+        dest="max_steps",
+        type=int,
+        default=20,
+        help="Execution step budget",
+    )
+    run_parser.add_argument(
+        "--require-confirmation",
+        dest="require_confirmation",
+        action="store_true",
+        help="Force manual confirmation before execution",
+    )
     return parser
 
 
@@ -56,18 +77,27 @@ def create_controller(
     anthropic_config = load_anthropic_config(llm_config_path)
     validate_startup_config(rpa_config, anthropic_config)
     registry = ToolRegistry()
-    registry.register("inspection", InspectionTool(rpa_config))
+    registry.register(
+        "inspection",
+        InspectionTool(rpa_config),
+        risk_level="read_only",
+        description="Run structured inspection flow via RPA",
+        tags=["inspection", "rpa"],
+        timeout_seconds=rpa_config.timeout_seconds,
+    )
 
     store = FileTaskStore()
+    session_store = FileSessionStore()
     audit_logger = FileAuditLogger()
     manager = TaskManager(store=store)
     provider = llm_provider or create_llm_provider(anthropic_config)
     return AgentController(
         parser=IntentParser(rpa_config=rpa_config, llm_provider=provider),
         task_manager=manager,
-        tool_registry=registry,
+        tool_executor=ToolExecutor(registry),
         summarizer=ResultSummarizer(),
         audit_logger=audit_logger,
+        session_store=session_store,
         logger=get_logger(__name__),
     )
 
@@ -87,7 +117,13 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         controller = create_controller(args.config_path, args.llm_config_path)
-        task = controller.run(args.task_input)
+        task = controller.run(
+            args.task_input,
+            session_id=args.session_id,
+            llm_profile=args.llm_profile,
+            max_steps=args.max_steps,
+            require_confirmation=args.require_confirmation,
+        )
     except ConfigError as exc:
         print(f"配置错误: {exc}")
         log_kv(logger, logging.ERROR, "Startup validation failed", error=str(exc))

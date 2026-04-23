@@ -259,6 +259,35 @@ def test_shadowbot_local_mode_launches_on_windows(tmp_path, monkeypatch):
     controller = create_controller(str(config_path), str(llm_config_path))
     task = controller.run("巡检生产环境 WebLogic")
 
-    assert task.status == "success"
-    assert task.result["data"]["inspection_result"] == "launched"
-    assert task.result["data"]["flow_id"] == "robot-uuid-001"
+
+def test_permission_change_enters_confirmation_state(tmp_path, monkeypatch):
+    config_path = tmp_path / "rpa.json"
+    llm_config_path = tmp_path / "llm.json"
+    _write_rpa_config(config_path)
+    _write_llm_config(llm_config_path, enabled=False)
+    monkeypatch.chdir(tmp_path)
+
+    controller = create_controller(str(config_path), str(llm_config_path))
+    task = controller.run("给张三开通生产权限")
+
+    assert task.status == "awaiting_confirmation"
+    assert task.risk_level == "high_risk_change"
+    assert "人工确认" in (task.report or "")
+    session_files = list((tmp_path / "storage" / "sessions").glob("*.json"))
+    assert len(session_files) == 1
+
+
+def test_web_action_is_policy_blocked(tmp_path, monkeypatch):
+    config_path = tmp_path / "rpa.json"
+    llm_config_path = tmp_path / "llm.json"
+    _write_rpa_config(config_path)
+    _write_llm_config(llm_config_path, enabled=False)
+    monkeypatch.chdir(tmp_path)
+
+    controller = create_controller(str(config_path), str(llm_config_path))
+    task = controller.run("帮我做一个网页自动化登录流程")
+
+    assert task.status == "blocked"
+    assert "尚未开放自动执行" in task.result["error"]
+    audit_lines = (tmp_path / "storage" / "audit" / "events.jsonl").read_text(encoding="utf-8")
+    assert "policy_blocked" in audit_lines

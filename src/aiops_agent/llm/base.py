@@ -17,6 +17,14 @@ class IntentClassification:
     request_id: str | None = None
 
 
+@dataclass(slots=True)
+class PlannedTask:
+    goal: str
+    steps: list[str]
+    risk_level: str
+    confirmation_required: bool
+
+
 class BaseLLMProvider:
     @property
     def enabled(self) -> bool:
@@ -25,4 +33,9 @@ class BaseLLMProvider:
     def classify_intent(
         self, text: str, defaults: dict[str, str]
     ) -> IntentClassification:
+        raise NotImplementedError
+
+    def plan_task(
+        self, text: str, intent: str, entities: dict[str, Any]
+    ) -> PlannedTask:
         raise NotImplementedError

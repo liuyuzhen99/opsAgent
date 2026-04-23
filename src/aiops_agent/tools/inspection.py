@@ -10,7 +10,7 @@ from urllib import error, request
 
 from aiops_agent.config import RPAConfig
 from aiops_agent.support.logging import log_kv
-from aiops_agent.tasks.models import ToolResult
+from aiops_agent.tasks.models import ToolExecutionResult
 from aiops_agent.tools.base import BaseTool
 
 
@@ -19,17 +19,21 @@ class InspectionTool(BaseTool):
         self.config = config
         self.logger = logging.getLogger(__name__)
 
-    def execute(self, params: dict[str, Any]) -> ToolResult:
+    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         validation_error = self._validate_config()
         if validation_error:
-            return ToolResult(success=False, data={}, error=validation_error)
+            return ToolExecutionResult(success=False, data={}, error=validation_error)
 
         system = params.get("system") or self.config.inspection.default_system
         env = params.get("env") or self.config.inspection.default_env
         flow_id = self.config.inspection.flow_map.get(system)
 
         if not flow_id:
-            return ToolResult(success=False, data={}, error=f"配置缺失: 未找到系统 {system} 的巡检流程映射")
+            return ToolExecutionResult(
+                success=False,
+                data={},
+                error=f"配置缺失: 未找到系统 {system} 的巡检流程映射",
+            )
 
         payload = {
             "flow_id": flow_id,
@@ -59,21 +63,21 @@ class InspectionTool(BaseTool):
             with request.urlopen(req, timeout=timeout) as response:
                 body = response.read().decode("utf-8")
         except error.HTTPError as exc:
-            return ToolResult(
+            return ToolExecutionResult(
                 success=False,
                 data={"status_code": exc.code},
                 error=f"RPA 平台调用失败: HTTP {exc.code}",
             )
         except error.URLError as exc:
-            return ToolResult(success=False, data={}, error=f"RPA 平台不可达: {exc.reason}")
+            return ToolExecutionResult(success=False, data={}, error=f"RPA 平台不可达: {exc.reason}")
 
         try:
             response_data = json.loads(body) if body else {}
         except json.JSONDecodeError:
-            return ToolResult(success=False, data={}, error="RPA 平台返回了非 JSON 数据")
+            return ToolExecutionResult(success=False, data={}, error="RPA 平台返回了非 JSON 数据")
 
         if not response_data:
-            return ToolResult(success=False, data={}, error="RPA 平台返回空结果")
+            return ToolExecutionResult(success=False, data={}, error="RPA 平台返回空结果")
 
         normalized = self._normalize_response(system, env, flow_id, response_data)
         log_kv(
@@ -85,7 +89,7 @@ class InspectionTool(BaseTool):
             flow_id=flow_id,
             success=normalized["success"],
         )
-        return ToolResult(
+        return ToolExecutionResult(
             success=normalized["success"],
             data=normalized["data"],
             error=normalized["error"],
@@ -137,9 +141,9 @@ class InspectionTool(BaseTool):
         env: str,
         flow_id: str,
         payload: dict[str, Any],
-    ) -> ToolResult:
+    ) -> ToolExecutionResult:
         if platform.system() != "Windows":
-            return ToolResult(
+            return ToolExecutionResult(
                 success=False,
                 data={},
                 error="ShadowBot 免费版本地启动模式仅支持在 Windows 上执行",
@@ -164,10 +168,10 @@ class InspectionTool(BaseTool):
                 timeout=self.config.shadowbot.command_timeout_seconds,
             )
         except subprocess.TimeoutExpired:
-            return ToolResult(success=False, data={}, error="ShadowBot 启动命令超时")
+            return ToolExecutionResult(success=False, data={}, error="ShadowBot 启动命令超时")
         except subprocess.CalledProcessError as exc:
             error_text = (exc.stderr or exc.stdout or "").strip()
-            return ToolResult(
+            return ToolExecutionResult(
                 success=False,
                 data={"returncode": exc.returncode},
                 error=f"ShadowBot 启动失败: {error_text or exc.returncode}",
@@ -200,7 +204,7 @@ class InspectionTool(BaseTool):
             flow_id=flow_id,
             robot_uuid=robot_uuid,
         )
-        return ToolResult(
+        return ToolExecutionResult(
             success=normalized["success"],
             data=normalized["data"],
             error=normalized["error"],

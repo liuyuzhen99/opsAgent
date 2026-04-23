@@ -17,3 +17,11 @@ class FileTaskStore:
         with path.open("w", encoding="utf-8") as handle:
             json.dump(asdict(task), handle, ensure_ascii=False, indent=2)
         return path
+
+    def load(self, task_id: str) -> Task | None:
+        path = self.root / f"{task_id}.json"
+        if not path.exists():
+            return None
+        with path.open("r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+        return Task(**raw)
