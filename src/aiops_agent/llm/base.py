@@ -39,3 +39,6 @@ class BaseLLMProvider:
         self, text: str, intent: str, entities: dict[str, Any]
     ) -> PlannedTask:
         raise NotImplementedError
+
+    def generate_chat_reply(self, text: str, context: dict[str, Any] | None = None) -> str:
+        raise NotImplementedError

@@ -59,6 +59,9 @@ class TaskManager:
         task.result = result
         self.persist(task)
 
+    def load(self, task_id: str) -> Task | None:
+        return self.store.load(task_id)
+
     def persist(self, task: Task) -> None:
         task.updated_at = datetime.now(UTC).isoformat()
         self.store.save(task)

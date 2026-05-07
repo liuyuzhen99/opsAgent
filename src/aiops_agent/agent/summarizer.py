@@ -8,6 +8,8 @@ from aiops_agent.tasks.models import Task
 class ResultSummarizer:
     def summarize(self, task: Task, tool_result: dict[str, Any]) -> str:
         data = tool_result.get("data") or {}
+        if task.intent == "general_chat":
+            return str(data.get("reply") or "你好，我是 opsAgent。")
         error = tool_result.get("error") or "无"
         suggestions = self._build_suggestion(task.status, data, error)
         lines = [

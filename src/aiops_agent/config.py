@@ -37,6 +37,16 @@ class ShadowBotConfig:
 
 
 @dataclass(slots=True)
+class KnowledgeConfig:
+    vault_path: str = ""
+    include_patterns: list[str] = field(default_factory=lambda: ["*.md"])
+    exclude_patterns: list[str] = field(
+        default_factory=lambda: [".obsidian/**", "attachments/**", "archive/**", "secrets/**"]
+    )
+    index_mode: str = "keyword"
+
+
+@dataclass(slots=True)
 class RPAConfig:
     provider: str = "yidao"
     execution_mode: str = "api"
@@ -45,6 +55,7 @@ class RPAConfig:
     auth: AuthConfig = field(default_factory=AuthConfig)
     inspection: InspectionConfig = field(default_factory=InspectionConfig)
     shadowbot: ShadowBotConfig = field(default_factory=ShadowBotConfig)
+    knowledge: KnowledgeConfig = field(default_factory=KnowledgeConfig)
 
     def validate_for_startup(self) -> None:
         errors: list[str] = []
@@ -138,6 +149,7 @@ def load_rpa_config(config_path: str | None = None) -> RPAConfig:
     auth = raw.get("auth", {})
     inspection = raw.get("inspection", {})
     shadowbot = raw.get("shadowbot", {})
+    knowledge = raw.get("knowledge", {})
     return RPAConfig(
         provider=raw.get("provider", "yidao"),
         execution_mode=raw.get("execution_mode", "api"),
@@ -157,6 +169,14 @@ def load_rpa_config(config_path: str | None = None) -> RPAConfig:
             robot_uuid=shadowbot.get("robot_uuid", ""),
             command_timeout_seconds=int(shadowbot.get("command_timeout_seconds", 10)),
             result_file=shadowbot.get("result_file", ""),
+        ),
+        knowledge=KnowledgeConfig(
+            vault_path=knowledge.get("vault_path", ""),
+            include_patterns=list(knowledge.get("include_patterns", ["*.md"])),
+            exclude_patterns=list(
+                knowledge.get("exclude_patterns", [".obsidian/**", "attachments/**", "archive/**", "secrets/**"])
+            ),
+            index_mode=knowledge.get("index_mode", "keyword"),
         ),
     )
 

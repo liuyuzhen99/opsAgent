@@ -8,16 +8,7 @@ class PolicyEngine:
         requires_confirmation = plan.confirmation_required or task.requires_explicit_confirmation
         risk_level = "high_risk_change" if task.intent == "permission_change" else plan.risk_level
 
-        if task.intent == "web_action":
-            return PolicyDecision(
-                allowed=False,
-                requires_confirmation=True,
-                risk_level=risk_level,
-                reason="web_action 能力已完成接口预留，但本阶段尚未开放自动执行。",
-                status="blocked",
-            )
-
-        if requires_confirmation:
+        if requires_confirmation and task.intent != "web_action":
             return PolicyDecision(
                 allowed=False,
                 requires_confirmation=True,

@@ -1,0 +1,25 @@
+{
+  "id": "7af5f64b-cd7e-4fd3-b2c0-27fd0c397daa",
+  "status": "active",
+  "task_ids": [
+    "963f0e1f-c522-45ba-a85b-cf87180d4cc8"
+  ],
+  "last_task_id": "963f0e1f-c522-45ba-a85b-cf87180d4cc8",
+  "summary": "last_intent=web_action; last_status=awaiting_confirmation; 用户目标=创建账号 carol，邮箱 carol@example.com，分配只读权限; 已完成动作=open_url,observe_page,open_url,click,type,type; 当前页面=Mock Admin - Users; 状态=awaiting_confirmation",
+  "rolling_summary": "用户目标=创建账号 carol，邮箱 carol@example.com，分配只读权限; 已完成动作=open_url,observe_page,open_url,click,type,type; 当前页面=Mock Admin - Users; 状态=awaiting_confirmation",
+  "recent_observations": [
+    {
+      "task_id": "963f0e1f-c522-45ba-a85b-cf87180d4cc8",
+      "url": "http://127.0.0.1:8765/users.html",
+      "title": "Mock Admin - Users",
+      "page_type": "form"
+    }
+  ],
+  "metadata": {
+    "last_url": "http://127.0.0.1:8765/users.html",
+    "last_page_type": "form",
+    "browser_state_path": "storage/artifacts/7af5f64b-cd7e-4fd3-b2c0-27fd0c397daa/browser-state.json"
+  },
+  "created_at": "2026-05-07T13:18:50.076225+00:00",
+  "updated_at": "2026-05-07T13:18:58.486464+00:00"
+}

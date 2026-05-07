@@ -277,7 +277,7 @@ def test_permission_change_enters_confirmation_state(tmp_path, monkeypatch):
     assert len(session_files) == 1
 
 
-def test_web_action_is_policy_blocked(tmp_path, monkeypatch):
+def test_web_action_side_effect_enters_confirmation_state(tmp_path, monkeypatch):
     config_path = tmp_path / "rpa.json"
     llm_config_path = tmp_path / "llm.json"
     _write_rpa_config(config_path)
@@ -285,9 +285,58 @@ def test_web_action_is_policy_blocked(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
     controller = create_controller(str(config_path), str(llm_config_path))
-    task = controller.run("帮我做一个网页自动化登录流程")
+    task = controller.run("帮我在网页里保存权限设置")
 
-    assert task.status == "blocked"
-    assert "尚未开放自动执行" in task.result["error"]
+    assert task.status == "awaiting_confirmation"
+    assert "人工确认" in (task.report or "")
+    assert task.result["data"]["status"] == "awaiting_confirmation"
     audit_lines = (tmp_path / "storage" / "audit" / "events.jsonl").read_text(encoding="utf-8")
-    assert "policy_blocked" in audit_lines
+    assert "action.blocked_for_confirmation" in audit_lines
+
+
+def test_ops_qa_uses_knowledge_contract(tmp_path, monkeypatch):
+    config_path = tmp_path / "rpa.json"
+    llm_config_path = tmp_path / "llm.json"
+    _write_rpa_config(config_path)
+    _write_llm_config(llm_config_path, enabled=False)
+    monkeypatch.chdir(tmp_path)
+
+    controller = create_controller(str(config_path), str(llm_config_path))
+    task = controller.run("如何处理 WebLogic 连接池告警")
+
+    assert task.status == "success"
+    assert task.result["data"]["answer"]["missing_info"] == ["knowledge.vault_path"]
+
+
+def test_general_chat_uses_chat_tool(tmp_path, monkeypatch):
+    config_path = tmp_path / "rpa.json"
+    llm_config_path = tmp_path / "llm.json"
+    _write_rpa_config(config_path)
+    _write_llm_config(llm_config_path, enabled=True)
+    monkeypatch.chdir(tmp_path)
+
+    class FakeProvider:
+        enabled = True
+
+        def classify_intent(self, text, defaults):
+            assert text == "hello"
+            return IntentClassification(
+                intent="general_chat",
+                entities={},
+                provider="openai",
+                model="deepseek-chat",
+            )
+
+        def generate_chat_reply(self, text, context=None):
+            assert text == "hello"
+            assert context["current_date"]
+            assert context["timezone"] == "Asia/Shanghai"
+            return "你好，我是 opsAgent。"
+
+    controller = create_controller(str(config_path), str(llm_config_path), llm_provider=FakeProvider())
+    task = controller.run("hello")
+
+    assert task.status == "success"
+    assert task.intent == "general_chat"
+    assert task.result["data"]["reply"] == "你好，我是 opsAgent。"
+    assert task.report == "你好，我是 opsAgent。"

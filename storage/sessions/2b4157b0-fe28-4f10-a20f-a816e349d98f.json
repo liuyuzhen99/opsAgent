@@ -1,0 +1,15 @@
+{
+  "id": "2b4157b0-fe28-4f10-a20f-a816e349d98f",
+  "status": "active",
+  "task_ids": [
+    "5868f689-6652-4dec-a363-6d5ca3d1aa1a",
+    "2e142687-104a-4bf0-9cf7-8d676e1cb55f"
+  ],
+  "last_task_id": "2e142687-104a-4bf0-9cf7-8d676e1cb55f",
+  "summary": "last_intent=general_chat; last_status=success; 用户目标=2*8=?; 已完成动作=无; 当前页面=无; 状态=success",
+  "rolling_summary": "用户目标=2*8=?; 已完成动作=无; 当前页面=无; 状态=success",
+  "recent_observations": [],
+  "metadata": {},
+  "created_at": "2026-05-07T14:06:45.847549+00:00",
+  "updated_at": "2026-05-07T14:06:56.438613+00:00"
+}

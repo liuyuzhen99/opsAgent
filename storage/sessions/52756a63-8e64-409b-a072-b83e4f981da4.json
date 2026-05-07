@@ -1,0 +1,14 @@
+{
+  "id": "52756a63-8e64-409b-a072-b83e4f981da4",
+  "status": "active",
+  "task_ids": [
+    "95202802-837b-4bdc-8e01-adcdc814319e"
+  ],
+  "last_task_id": "95202802-837b-4bdc-8e01-adcdc814319e",
+  "summary": "last_intent=web_action; last_status=failed; 用户目标=创建账号 alice，邮箱 alice@example.com，分配只读权限; 已完成动作=无; 当前页面=无; 状态=failed",
+  "rolling_summary": "用户目标=创建账号 alice，邮箱 alice@example.com，分配只读权限; 已完成动作=无; 当前页面=无; 状态=failed",
+  "recent_observations": [],
+  "metadata": {},
+  "created_at": "2026-05-07T13:09:16.895548+00:00",
+  "updated_at": "2026-05-07T13:09:20.810924+00:00"
+}

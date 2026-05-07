@@ -1,0 +1,91 @@
+{
+  "trace_id": "f9afbe1eb4c342509b5a70d7208a527d",
+  "input": "hello",
+  "id": "017c6498-af66-49bd-81d5-84c91db0ef77",
+  "intent": "general_chat",
+  "status": "success",
+  "session_id": "b789a075-0272-4ef1-82b0-5d6c7c324a3b",
+  "current_stage": "completed",
+  "entities": {
+    "system": "WebLogic",
+    "env": "prod",
+    "raw_text": "hello",
+    "llm_provider": "openai",
+    "llm_model": "deepseek-chat",
+    "browser_channel": "chromium"
+  },
+  "plan": {
+    "goal": "在 chat 模式下回复普通对话",
+    "steps": [
+      "识别为非运维执行任务",
+      "调用聊天回复工具生成自然语言反馈",
+      "提示用户可继续输入运维任务"
+    ],
+    "selected_tools": [
+      "chat"
+    ],
+    "tool_calls": [
+      {
+        "tool_name": "chat",
+        "action": "reply",
+        "params": {
+          "message": "hello",
+          "trace_id": "f9afbe1eb4c342509b5a70d7208a527d",
+          "task_id": "017c6498-af66-49bd-81d5-84c91db0ef77",
+          "session_id": "b789a075-0272-4ef1-82b0-5d6c7c324a3b",
+          "max_steps": 20
+        },
+        "idempotency_key": null,
+        "risk_level": "read_only",
+        "timeout_seconds": null
+      }
+    ],
+    "risk_level": "read_only",
+    "confirmation_required": false,
+    "success_criteria": [
+      "返回自然语言回复",
+      "不误触发运维工具"
+    ],
+    "notes": []
+  },
+  "selected_tools": [
+    "chat"
+  ],
+  "risk_level": "read_only",
+  "confirmation_required": false,
+  "artifacts": [],
+  "audit_refs": [],
+  "tool_calls": [
+    {
+      "tool_name": "chat",
+      "action": "reply",
+      "params": {
+        "message": "hello",
+        "trace_id": "f9afbe1eb4c342509b5a70d7208a527d",
+        "task_id": "017c6498-af66-49bd-81d5-84c91db0ef77",
+        "session_id": "b789a075-0272-4ef1-82b0-5d6c7c324a3b",
+        "max_steps": 20
+      },
+      "idempotency_key": null,
+      "risk_level": "read_only",
+      "timeout_seconds": null
+    }
+  ],
+  "llm_profile": null,
+  "max_steps": 20,
+  "requires_explicit_confirmation": false,
+  "result": {
+    "success": true,
+    "data": {
+      "message": "hello",
+      "reply": "Hello! How can I help you today?",
+      "llm_used": true
+    },
+    "error": null,
+    "retryable": false,
+    "artifacts": []
+  },
+  "report": "Hello! How can I help you today?",
+  "created_at": "2026-05-07T14:02:58.429505+00:00",
+  "updated_at": "2026-05-07T14:03:00.840494+00:00"
+}

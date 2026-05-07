@@ -12,7 +12,7 @@ from aiops_agent.support.logging import log_kv
 
 
 class LangChainLLMProvider(BaseLLMProvider):
-    SUPPORTED_INTENTS = {"inspection", "permission_change", "ops_qa", "web_action"}
+    SUPPORTED_INTENTS = {"inspection", "permission_change", "ops_qa", "web_action", "general_chat"}
 
     def __init__(self, config: LLMProviderConfig):
         self.config = config
@@ -30,7 +30,8 @@ class LangChainLLMProvider(BaseLLMProvider):
 
         prompt = (
             "Parse the enterprise AIOps request into JSON.\n"
-            "Schema: {\"intent\": \"inspection|permission_change|ops_qa|web_action\", \"entities\": {...}}\n"
+            "Schema: {\"intent\": \"inspection|permission_change|ops_qa|web_action|general_chat\", \"entities\": {...}}\n"
+            "Use general_chat for greetings, small talk, or requests that are not enterprise ops tasks.\n"
             f"text: {text}\n"
             f"default_system: {defaults['system']}\n"
             f"default_env: {defaults['env']}\n"
@@ -84,6 +85,45 @@ class LangChainLLMProvider(BaseLLMProvider):
             risk_level=str(parsed.get("risk_level") or "read_only"),
             confirmation_required=bool(parsed.get("confirmation_required")),
         )
+
+    def generate_chat_reply(self, text: str, context: dict[str, Any] | None = None) -> str:
+        if not self.enabled:
+            raise LLMError("LLM chat disabled")
+
+        context = context or {}
+        model = self._build_model("chat")
+        try:
+            response = model.invoke(
+                [
+                    SystemMessage(
+                        content=(
+                            "You are opsAgent's interactive chat interface. "
+                            "Reply naturally and concisely. If the user asks for an ops action, "
+                            "tell them they can phrase it as a task for opsAgent to execute. "
+                            "Runtime context is authoritative. For questions about today, current date, "
+                            "current time, or relative dates, use only the provided runtime context and do not guess."
+                        )
+                    ),
+                    HumanMessage(content=f"context: {json.dumps(context, ensure_ascii=False)}\nuser: {text}"),
+                ]
+            )
+        except Exception as exc:  # pragma: no cover - network and SDK errors vary.
+            raise LLMError(f"LLM request failed: {exc}") from exc
+
+        raw_text = getattr(response, "content", "")
+        if isinstance(raw_text, list):
+            fragments: list[str] = []
+            for item in raw_text:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    fragments.append(str(item.get("text", "")))
+                elif hasattr(item, "text"):
+                    fragments.append(str(getattr(item, "text")))
+            raw_text = "".join(fragments)
+        raw_text = str(raw_text).strip()
+        if not raw_text:
+            raise LLMError("LLM returned empty content")
+        log_kv(self.logger, logging.INFO, "LangChain model invocation succeeded", role="chat", model=self._resolve_model("chat"))
+        return raw_text
 
     def _invoke_json(self, role: str, prompt: str) -> str:
         model = self._build_model(role)

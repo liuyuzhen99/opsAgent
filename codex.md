@@ -7,6 +7,7 @@ AIOps Agent MVP 设计文档 v0.1
 - 自然语言驱动运维任务执行
 - 多自动化工具（RPA / Playwright）的统一调度
 - 执行结果的结构化分析与输出
+- 基于 Obsidian 本地 vault 的运维知识问答
 - 高风险操作的人机协同控制
 
 该系统不追求“完全自动化”，而强调：
@@ -27,7 +28,7 @@ AIOps Agent MVP 设计文档 v0.1
 
 1. 巡检任务自动执行（基于 RPA）
 2. 权限管理自动化（基于 Playwright）
-3. 运维知识问答（Ops Copilot）
+3. 运维知识问答（Ops Copilot，基于 Obsidian 本地 vault）
 4. 人工确认机制（关键节点介入）
 5. 执行日志与审计能力
 
@@ -53,7 +54,7 @@ AIOps Agent MVP 设计文档 v0.1
 
 - RPA 工具
 - Playwright 工具
-- 知识库工具
+- Obsidian vault 知识库工具
 - 人工确认工具
 
 4. 支撑层
@@ -172,7 +173,9 @@ execute(tool_name, params)
 
 功能：
 
-- 查询 SOP 与运维知识
+- 基于 Obsidian 本地 vault 查询 SOP、故障记录、巡检手册和变更流程
+- 解析 Markdown 笔记、标签、frontmatter、标题与双链关系
+- 后续支持关键词检索与本地向量索引结合的混合检索
 
 输入：
 
@@ -182,6 +185,13 @@ execute(tool_name, params)
 
 - 标准操作步骤
 - 注意事项
+- 来源笔记、章节或本地路径引用
+- 置信度与缺失信息提示
+
+接入方式：
+
+- 生产默认通过配置项指向外部 Obsidian vault 本地路径
+- 仓库内 `knowledge/` 仅用于模板、示例和测试数据，不存放真实企业知识库内容
 
 ⸻
 
@@ -265,8 +275,10 @@ execute(tool_name, params)
 5.3 知识问答流程
 
 1. 用户提问
-2. 调用知识库
-3. 返回标准答案
+2. 识别为 ops_qa
+3. 读取配置中的 Obsidian vault 路径
+4. 检索相关 Markdown 笔记、SOP、标签和链接上下文
+5. 返回带来源引用的标准答案
 
 ⸻
 
@@ -290,6 +302,24 @@ data,
 error
 }
 
+KnowledgeAnswer
+
+{
+answer,
+sources,
+confidence,
+missing_info
+}
+
+KnowledgeSource
+
+{
+title,
+path,
+section,
+matched_text
+}
+
 ⸻
 
 七、目录结构
@@ -304,6 +334,12 @@ aiops-agent/
 ├── runtimes/
 ├── storage/
 └── configs/
+
+说明：
+
+- `knowledge/` 目录用于示例 vault、测试 fixture 或知识库模板
+- 真实 Obsidian vault 通过配置引用外部本地路径
+- 不将企业真实 SOP、故障记录或敏感笔记提交到代码仓库
 ⸻
 
 九、验收标准

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -38,7 +38,7 @@ class ToolExecutionResult:
             "data": self.data,
             "error": self.error,
             "retryable": self.retryable,
-            "artifacts": [artifact.__dict__ for artifact in self.artifacts],
+            "artifacts": [asdict(artifact) for artifact in self.artifacts],
         }
 
 

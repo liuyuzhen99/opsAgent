@@ -1,11 +1,10 @@
 {
-  "provider": "anthropic",
-  "enabled": false,
-  "base_url": "https://api.anthropic.com",
-  "api_key": "",
-  "model": "claude-sonnet-4-20250514",
-  "api_version": "2023-06-01",
-  "timeout_seconds": 20,
-  "max_retries": 2,
-  "max_tokens": 512
+  "provider": "openai",
+  "enabled": true,
+  "base_url": "https://api.deepseek.com/v1",
+  "api_key": "sk-9fdc22a0cd39441aae1b3badfec3c120",
+  "model": "deepseek-chat",
+  "timeout_seconds": 30,
+  "max_retries": 3,
+  "max_tokens": 1024
 }

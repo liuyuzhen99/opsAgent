@@ -1,0 +1,6 @@
+title=Mock Admin - Users
+url=http://127.0.0.1:8765/users.html
+page_type=form
+blocking_reason=
+messages=用户管理
+elements=新建用户 | 用户名 | 邮箱 | 保存用户

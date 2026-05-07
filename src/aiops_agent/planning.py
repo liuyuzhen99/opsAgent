@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 from aiops_agent.tasks.models import ExecutionPlan, ToolCallSpec
 
 
@@ -48,11 +50,20 @@ class PlanningService:
 
         if intent == "ops_qa":
             return ExecutionPlan(
-                goal="提供运维知识问答入口占位响应",
+                goal="通过 Obsidian vault 知识库工具契约处理运维问答",
                 steps=[
                     "记录问答请求",
-                    "为后续知识检索工具保留统一执行接口",
+                    "调用知识库工具检查 vault 配置",
                     "返回当前阶段能力说明",
+                ],
+                selected_tools=["knowledge"],
+                tool_calls=[
+                    ToolCallSpec(
+                        tool_name="knowledge",
+                        action="query",
+                        params={"question": entities.get("raw_text", task_input)},
+                        risk_level="read_only",
+                    )
                 ],
                 risk_level="read_only",
                 confirmation_required=False,
@@ -60,18 +71,85 @@ class PlanningService:
                 notes=["知识检索工具将在后续阶段接入。"],
             )
 
-        if intent == "web_action":
+        if intent == "general_chat":
             return ExecutionPlan(
-                goal="为后续网页自动化能力保留统一入口",
+                goal="在 chat 模式下回复普通对话",
                 steps=[
-                    "识别网页任务目标",
-                    "预留统一编排与风险控制接口",
-                    "当前阶段返回能力边界说明",
+                    "识别为非运维执行任务",
+                    "调用聊天回复工具生成自然语言反馈",
+                    "提示用户可继续输入运维任务",
                 ],
-                risk_level="controlled_change",
-                confirmation_required=True,
-                success_criteria=["明确告知能力已预留但未完全开放"],
-                notes=["Playwright 自主执行不在本阶段交付范围内。"],
+                selected_tools=["chat"],
+                tool_calls=[
+                    ToolCallSpec(
+                        tool_name="chat",
+                        action="reply",
+                        params={"message": entities.get("raw_text", task_input)},
+                        risk_level="read_only",
+                    )
+                ],
+                risk_level="read_only",
+                confirmation_required=False,
+                success_criteria=["返回自然语言回复", "不误触发运维工具"],
+            )
+
+        if intent == "web_action":
+            start_url = entities.get("start_url")
+            raw_text = str(entities.get("raw_text", task_input))
+            allowed_domains = list(entities.get("allowed_domains") or [])
+            if start_url and not allowed_domains:
+                host = urlparse(str(start_url)).netloc
+                if host:
+                    allowed_domains.append(host)
+            has_side_effect = bool(entities.get("has_side_effect"))
+            workflow = entities.get("workflow")
+            workflow_fields = dict(entities.get("workflow_fields") or {})
+            if workflow:
+                has_side_effect = True
+            risk_level = "unsafe_mutation" if has_side_effect else "safe_read"
+            params = {
+                "start_url": start_url,
+                "user_goal": raw_text,
+                "success_criteria": ["完成用户描述的网页任务", "保存最终页面 observation 与截图"],
+                "forbidden_actions": ["绕过验证码/MFA", "访问非允许域名", "未确认执行远端写入"],
+                "allowed_domains": allowed_domains,
+                "credential_ref": entities.get("credential_ref"),
+                "requires_login": bool(entities.get("requires_login")),
+                "requires_remote_mutation": has_side_effect,
+                "auto_plan": True,
+                "site_key": entities.get("site_key"),
+                "workflow": workflow,
+                "workflow_fields": workflow_fields,
+                "site_config": entities.get("site_config") or {},
+                "browser_config_error": entities.get("browser_config_error"),
+                "browser_channel": entities.get("browser_channel"),
+                "browser_slow_mo_ms": int(entities.get("browser_slow_mo_ms", 0)),
+                "trace_enabled": bool(entities.get("trace_enabled")),
+                "video_enabled": bool(entities.get("video_enabled")),
+                "max_steps": int(entities.get("max_steps", 20)),
+                "actions": [],
+            }
+            return ExecutionPlan(
+                goal="在受控动作集合内执行网页自动化任务",
+                steps=[
+                    "生成结构化网页任务规格",
+                    "启动单 session 浏览器上下文",
+                    "每步依据最新 observation 规划下一步受限动作",
+                    "遇到远端副作用动作前进入人工确认",
+                ],
+                selected_tools=["browser_agent"],
+                tool_calls=[
+                    ToolCallSpec(
+                        tool_name="browser_agent",
+                        action="run_browser_task",
+                        params=params,
+                        risk_level=risk_level,
+                    )
+                ],
+                risk_level=risk_level,
+                confirmation_required=False,
+                success_criteria=["返回结构化 observation", "保存关键 artifact", "审计记录覆盖每一步动作"],
+                notes=["第一版采用规则生成初始动作；后续可接入 LLM Planner 生成同一动作协议。"],
             )
 
         return ExecutionPlan(

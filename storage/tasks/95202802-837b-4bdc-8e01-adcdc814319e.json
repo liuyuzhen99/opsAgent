@@ -1,0 +1,261 @@
+{
+  "trace_id": "3ec5d5c3052b4b0d9d047816eb83222a",
+  "input": "创建账号 alice，邮箱 alice@example.com，分配只读权限",
+  "id": "95202802-837b-4bdc-8e01-adcdc814319e",
+  "intent": "web_action",
+  "status": "failed",
+  "session_id": "52756a63-8e64-409b-a072-b83e4f981da4",
+  "current_stage": "failed",
+  "entities": {
+    "raw_text": "创建账号 alice，邮箱 alice@example.com，分配只读权限",
+    "start_url": "http://127.0.0.1:8765",
+    "allowed_domains": [
+      "127.0.0.1:8765"
+    ],
+    "requires_login": false,
+    "has_side_effect": true,
+    "workflow": "create_user_and_assign_role",
+    "workflow_fields": {
+      "username": "alice",
+      "email": "alice@example.com",
+      "role": "只读权限"
+    },
+    "site_key": "mock-admin",
+    "site_config": {
+      "site_key": "mock-admin",
+      "base_url": "http://127.0.0.1:8765",
+      "login_url": null,
+      "allowed_domains": [
+        "127.0.0.1:8765"
+      ],
+      "login_fields": {},
+      "workflows": {
+        "create_user": {
+          "entry_url": "/users.html",
+          "open_button": "新建用户",
+          "submit_button": "保存用户",
+          "success_signals": [
+            "用户创建成功"
+          ],
+          "fields": {
+            "username": "用户名",
+            "email": "邮箱"
+          }
+        },
+        "assign_role": {
+          "entry_url": "/users/{username}/roles.html",
+          "open_button": null,
+          "submit_button": "保存权限",
+          "success_signals": [
+            "权限分配成功"
+          ],
+          "fields": {
+            "role": "角色"
+          }
+        }
+      }
+    }
+  },
+  "plan": {
+    "goal": "在受控动作集合内执行网页自动化任务",
+    "steps": [
+      "生成结构化网页任务规格",
+      "启动单 session 浏览器上下文",
+      "每步依据最新 observation 规划下一步受限动作",
+      "遇到远端副作用动作前进入人工确认"
+    ],
+    "selected_tools": [
+      "browser_agent"
+    ],
+    "tool_calls": [
+      {
+        "tool_name": "browser_agent",
+        "action": "run_browser_task",
+        "params": {
+          "start_url": "http://127.0.0.1:8765",
+          "user_goal": "创建账号 alice，邮箱 alice@example.com，分配只读权限",
+          "success_criteria": [
+            "完成用户描述的网页任务",
+            "保存最终页面 observation 与截图"
+          ],
+          "forbidden_actions": [
+            "绕过验证码/MFA",
+            "访问非允许域名",
+            "未确认执行远端写入"
+          ],
+          "allowed_domains": [
+            "127.0.0.1:8765"
+          ],
+          "credential_ref": null,
+          "requires_login": false,
+          "requires_remote_mutation": true,
+          "auto_plan": true,
+          "site_key": "mock-admin",
+          "workflow": "create_user_and_assign_role",
+          "workflow_fields": {
+            "username": "alice",
+            "email": "alice@example.com",
+            "role": "只读权限"
+          },
+          "site_config": {
+            "site_key": "mock-admin",
+            "base_url": "http://127.0.0.1:8765",
+            "login_url": null,
+            "allowed_domains": [
+              "127.0.0.1:8765"
+            ],
+            "login_fields": {},
+            "workflows": {
+              "create_user": {
+                "entry_url": "/users.html",
+                "open_button": "新建用户",
+                "submit_button": "保存用户",
+                "success_signals": [
+                  "用户创建成功"
+                ],
+                "fields": {
+                  "username": "用户名",
+                  "email": "邮箱"
+                }
+              },
+              "assign_role": {
+                "entry_url": "/users/{username}/roles.html",
+                "open_button": null,
+                "submit_button": "保存权限",
+                "success_signals": [
+                  "权限分配成功"
+                ],
+                "fields": {
+                  "role": "角色"
+                }
+              }
+            }
+          },
+          "browser_config_error": null,
+          "trace_enabled": false,
+          "video_enabled": false,
+          "max_steps": 20,
+          "actions": [],
+          "trace_id": "3ec5d5c3052b4b0d9d047816eb83222a",
+          "task_id": "95202802-837b-4bdc-8e01-adcdc814319e",
+          "session_id": "52756a63-8e64-409b-a072-b83e4f981da4"
+        },
+        "idempotency_key": null,
+        "risk_level": "unsafe_mutation",
+        "timeout_seconds": null
+      }
+    ],
+    "risk_level": "unsafe_mutation",
+    "confirmation_required": false,
+    "success_criteria": [
+      "返回结构化 observation",
+      "保存关键 artifact",
+      "审计记录覆盖每一步动作"
+    ],
+    "notes": [
+      "第一版采用规则生成初始动作；后续可接入 LLM Planner 生成同一动作协议。"
+    ]
+  },
+  "selected_tools": [
+    "browser_agent"
+  ],
+  "risk_level": "unsafe_mutation",
+  "confirmation_required": false,
+  "artifacts": [],
+  "audit_refs": [],
+  "tool_calls": [
+    {
+      "tool_name": "browser_agent",
+      "action": "run_browser_task",
+      "params": {
+        "start_url": "http://127.0.0.1:8765",
+        "user_goal": "创建账号 alice，邮箱 alice@example.com，分配只读权限",
+        "success_criteria": [
+          "完成用户描述的网页任务",
+          "保存最终页面 observation 与截图"
+        ],
+        "forbidden_actions": [
+          "绕过验证码/MFA",
+          "访问非允许域名",
+          "未确认执行远端写入"
+        ],
+        "allowed_domains": [
+          "127.0.0.1:8765"
+        ],
+        "credential_ref": null,
+        "requires_login": false,
+        "requires_remote_mutation": true,
+        "auto_plan": true,
+        "site_key": "mock-admin",
+        "workflow": "create_user_and_assign_role",
+        "workflow_fields": {
+          "username": "alice",
+          "email": "alice@example.com",
+          "role": "只读权限"
+        },
+        "site_config": {
+          "site_key": "mock-admin",
+          "base_url": "http://127.0.0.1:8765",
+          "login_url": null,
+          "allowed_domains": [
+            "127.0.0.1:8765"
+          ],
+          "login_fields": {},
+          "workflows": {
+            "create_user": {
+              "entry_url": "/users.html",
+              "open_button": "新建用户",
+              "submit_button": "保存用户",
+              "success_signals": [
+                "用户创建成功"
+              ],
+              "fields": {
+                "username": "用户名",
+                "email": "邮箱"
+              }
+            },
+            "assign_role": {
+              "entry_url": "/users/{username}/roles.html",
+              "open_button": null,
+              "submit_button": "保存权限",
+              "success_signals": [
+                "权限分配成功"
+              ],
+              "fields": {
+                "role": "角色"
+              }
+            }
+          }
+        },
+        "browser_config_error": null,
+        "trace_enabled": false,
+        "video_enabled": false,
+        "max_steps": 20,
+        "actions": [],
+        "trace_id": "3ec5d5c3052b4b0d9d047816eb83222a",
+        "task_id": "95202802-837b-4bdc-8e01-adcdc814319e",
+        "session_id": "52756a63-8e64-409b-a072-b83e4f981da4"
+      },
+      "idempotency_key": null,
+      "risk_level": "unsafe_mutation",
+      "timeout_seconds": null
+    }
+  ],
+  "llm_profile": null,
+  "max_steps": 12,
+  "requires_explicit_confirmation": false,
+  "result": {
+    "success": false,
+    "data": {
+      "status": "failed",
+      "goal": "创建账号 alice，邮箱 alice@example.com，分配只读权限",
+      "steps": []
+    },
+    "error": "BrowserType.launch: Target page, context or browser has been closed\nBrowser logs:\n\n<launching> /Users/randy/Library/Caches/ms-playwright/chromium_headless_shell-1208/chrome-headless-shell-mac-arm64/chrome-headless-shell --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-extensions --disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,BoundaryEventDispatchTracksNodeRemoval,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,Translate,AutoDeElevate,RenderDocument,OptimizationHints --enable-features=CDPScreenshotNewSurface --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --force-color-profile=srgb --metrics-recording-only --no-first-run --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --edge-skip-compat-layer-relaunch --enable-automation --disable-infobars --disable-search-engine-choice-screen --disable-sync --enable-unsafe-swiftshader --headless --hide-scrollbars --mute-audio --blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4 --no-sandbox --user-data-dir=/var/folders/zm/v890ygzs5gg2mb4jsn8qgr1m0000gn/T/playwright_chromiumdev_profile-0ZNq0k --remote-debugging-pipe --no-startup-window\n<launched> pid=51333\n[pid=51333][err] [0507/210920.563149:ERROR:base/power_monitor/thermal_state_observer_mac.mm:140] ThermalStateObserverMac unable to register to power notifications. Result: 9\n[pid=51333][err] [0507/210920.567080:ERROR:net/dns/dns_config_service_posix.cc:138] DNS config watch failed to start.\n[pid=51333][err] [0507/210920.568559:WARNING:net/dns/dns_config_service_posix.cc:197] Failed to read DnsConfig.\n[pid=51333][err] [0507/210920.568639:FATAL:base/apple/mach_port_rendezvous_mac.cc:155] Check failed: kr == KERN_SUCCESS. bootstrap_check_in org.chromium.Chromium.MachPortRendezvousServer.51333: Permission denied (1100)\nCall log:\n  - <launching> /Users/randy/Library/Caches/ms-playwright/chromium_headless_shell-1208/chrome-headless-shell-mac-arm64/chrome-headless-shell --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-extensions --disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,BoundaryEventDispatchTracksNodeRemoval,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,Translate,AutoDeElevate,RenderDocument,OptimizationHints --enable-features=CDPScreenshotNewSurface --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --force-color-profile=srgb --metrics-recording-only --no-first-run --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --edge-skip-compat-layer-relaunch --enable-automation --disable-infobars --disable-search-engine-choice-screen --disable-sync --enable-unsafe-swiftshader --headless --hide-scrollbars --mute-audio --blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4 --no-sandbox --user-data-dir=/var/folders/zm/v890ygzs5gg2mb4jsn8qgr1m0000gn/T/playwright_chromiumdev_profile-0ZNq0k --remote-debugging-pipe --no-startup-window\n  - <launched> pid=51333\n  - [pid=51333][err] [0507/210920.563149:ERROR:base/power_monitor/thermal_state_observer_mac.mm:140] ThermalStateObserverMac unable to register to power notifications. Result: 9\n  - [pid=51333][err] [0507/210920.567080:ERROR:net/dns/dns_config_service_posix.cc:138] DNS config watch failed to start.\n  - [pid=51333][err] [0507/210920.568559:WARNING:net/dns/dns_config_service_posix.cc:197] Failed to read DnsConfig.\n  - [pid=51333][err] [0507/210920.568639:FATAL:base/apple/mach_port_rendezvous_mac.cc:155] Check failed: kr == KERN_SUCCESS. bootstrap_check_in org.chromium.Chromium.MachPortRendezvousServer.51333: Permission denied (1100)\n  - [pid=51333] <gracefully close start>\n  - [pid=51333] <kill>\n  - [pid=51333] <will force kill>\n  - [pid=51333] exception while trying to kill process: Error: kill EPERM\n  - [pid=51333] <process did exit: exitCode=null, signal=SIGTRAP>\n  - [pid=51333] starting temporary directories cleanup\n  - [pid=51333] finished temporary directories cleanup\n  - [pid=51333] <gracefully close end>\n",
+    "retryable": false,
+    "artifacts": []
+  },
+  "report": "任务类型：web_action\n执行状态：failed\n风险等级：unsafe_mutation\n异常信息：BrowserType.launch: Target page, context or browser has been closed\nBrowser logs:\n\n<launching> /Users/randy/Library/Caches/ms-playwright/chromium_headless_shell-1208/chrome-headless-shell-mac-arm64/chrome-headless-shell --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-extensions --disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,BoundaryEventDispatchTracksNodeRemoval,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,Translate,AutoDeElevate,RenderDocument,OptimizationHints --enable-features=CDPScreenshotNewSurface --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --force-color-profile=srgb --metrics-recording-only --no-first-run --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --edge-skip-compat-layer-relaunch --enable-automation --disable-infobars --disable-search-engine-choice-screen --disable-sync --enable-unsafe-swiftshader --headless --hide-scrollbars --mute-audio --blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4 --no-sandbox --user-data-dir=/var/folders/zm/v890ygzs5gg2mb4jsn8qgr1m0000gn/T/playwright_chromiumdev_profile-0ZNq0k --remote-debugging-pipe --no-startup-window\n<launched> pid=51333\n[pid=51333][err] [0507/210920.563149:ERROR:base/power_monitor/thermal_state_observer_mac.mm:140] ThermalStateObserverMac unable to register to power notifications. Result: 9\n[pid=51333][err] [0507/210920.567080:ERROR:net/dns/dns_config_service_posix.cc:138] DNS config watch failed to start.\n[pid=51333][err] [0507/210920.568559:WARNING:net/dns/dns_config_service_posix.cc:197] Failed to read DnsConfig.\n[pid=51333][err] [0507/210920.568639:FATAL:base/apple/mach_port_rendezvous_mac.cc:155] Check failed: kr == KERN_SUCCESS. bootstrap_check_in org.chromium.Chromium.MachPortRendezvousServer.51333: Permission denied (1100)\nCall log:\n  - <launching> /Users/randy/Library/Caches/ms-playwright/chromium_headless_shell-1208/chrome-headless-shell-mac-arm64/chrome-headless-shell --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-extensions --disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,BoundaryEventDispatchTracksNodeRemoval,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,Translate,AutoDeElevate,RenderDocument,OptimizationHints --enable-features=CDPScreenshotNewSurface --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --force-color-profile=srgb --metrics-recording-only --no-first-run --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --edge-skip-compat-layer-relaunch --enable-automation --disable-infobars --disable-search-engine-choice-screen --disable-sync --enable-unsafe-swiftshader --headless --hide-scrollbars --mute-audio --blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4 --no-sandbox --user-data-dir=/var/folders/zm/v890ygzs5gg2mb4jsn8qgr1m0000gn/T/playwright_chromiumdev_profile-0ZNq0k --remote-debugging-pipe --no-startup-window\n  - <launched> pid=51333\n  - [pid=51333][err] [0507/210920.563149:ERROR:base/power_monitor/thermal_state_observer_mac.mm:140] ThermalStateObserverMac unable to register to power notifications. Result: 9\n  - [pid=51333][err] [0507/210920.567080:ERROR:net/dns/dns_config_service_posix.cc:138] DNS config watch failed to start.\n  - [pid=51333][err] [0507/210920.568559:WARNING:net/dns/dns_config_service_posix.cc:197] Failed to read DnsConfig.\n  - [pid=51333][err] [0507/210920.568639:FATAL:base/apple/mach_port_rendezvous_mac.cc:155] Check failed: kr == KERN_SUCCESS. bootstrap_check_in org.chromium.Chromium.MachPortRendezvousServer.51333: Permission denied (1100)\n  - [pid=51333] <gracefully close start>\n  - [pid=51333] <kill>\n  - [pid=51333] <will force kill>\n  - [pid=51333] exception while trying to kill process: Error: kill EPERM\n  - [pid=51333] <process did exit: exitCode=null, signal=SIGTRAP>\n  - [pid=51333] starting temporary directories cleanup\n  - [pid=51333] finished temporary directories cleanup\n  - [pid=51333] <gracefully close end>\n\n执行计划：生成结构化网页任务规格；启动单 session 浏览器上下文；每步依据最新 observation 规划下一步受限动作；遇到远端副作用动作前进入人工确认\n建议操作：请检查 RPA 平台连通性、流程配置和输入参数后重试。",
+  "created_at": "2026-05-07T13:09:16.895617+00:00",
+  "updated_at": "2026-05-07T13:09:20.810534+00:00"
+}

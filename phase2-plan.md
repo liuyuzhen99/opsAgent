@@ -17,6 +17,8 @@ Phase 2 不再以影刀集成为主，而是把当前项目从“单轮意图识
 
 Phase 2 的交付原则不是“一次把所有基础设施补齐”，而是先交付一个可运行、可停止、可追踪、可审计的 Web Agent MVP，再在此之上补完恢复能力与记忆能力。
 
+运维知识库方向收敛为基于 Obsidian 本地 vault 构建。Phase 2 只预留 `ops_qa` 的知识源配置与工具契约，不交付完整检索、索引或 RAG 管线；真实企业知识库通过外部本地路径接入，不进入代码仓库。
+
 ### Delivery Tiers
 
 - `P0 / MVP 必做`
@@ -35,12 +37,14 @@ Phase 2 的交付原则不是“一次把所有基础设施补齐”，而是先
 
 - `P2 / Phase 2 内可选增强`
   - 结构化任务级/会话级记忆
+  - Obsidian 本地 vault 知识源配置与工具接口预留
   - 审计日志与运行日志彻底分层
   - Playwright trace/video 开关
   - 更完整的 artifact 归档与执行报告
 
 - `明确延期`
   - 长期跨会话用户画像
+  - 完整 Obsidian vault 检索、索引与 RAG 问答管线
   - 多浏览器、多标签复杂编排
   - 绕过验证码、MFA、扫码登录
   - 通用脚本库编排平台
@@ -112,6 +116,14 @@ Phase 2 的交付原则不是“一次把所有基础设施补齐”，而是先
   - 记忆应以结构化存储为主，摘要文本为辅，便于恢复与调试。
   - 第一版不要自动跨站点泛化“习惯记忆”，避免错误迁移。
 
+- Obsidian vault 知识库接口预留
+  - `ops_qa` 不再泛化为抽象知识库方向，而是明确面向本地 Obsidian vault。
+  - Phase 2 只预留配置、工具契约和占位执行路径，不实现完整解析、索引、检索或答案生成。
+  - 生产默认通过配置项引用外部 vault 路径；仓库内 `knowledge/` 只用于模板、样例和测试 fixture。
+  - 未来检索形态采用混合检索：Markdown/frontmatter/tag/backlink/title 关键词检索 + 本地向量索引。
+  - 知识问答结果必须可追溯来源，至少能返回笔记标题、路径、章节或匹配片段。
+  - vault 内容可能包含敏感运维信息，索引、日志和审计中不能泄露密码、token、cookie 或内部私密字段。
+
 - 凭据与登录能力
   - Phase 2 支持 Agent 使用账号密码执行登录。
   - 凭据不直接写入 task/session 持久化内容，持久化中只保存引用标识和脱敏信息。
@@ -145,7 +157,7 @@ Phase 2 的交付原则不是“一次把所有基础设施补齐”，而是先
 
 - 非目标与边界
   - Phase 2 不把影刀结果回收作为主线。
-  - Phase 2 不做完整长期记忆或向量知识库。
+  - Phase 2 不做完整长期记忆，也不实现完整 Obsidian vault 检索、索引或向量知识库。
   - Phase 2 不支持绕过验证码或 MFA。
   - Phase 2 不追求多浏览器、多标签复杂编排，先以单浏览器上下文、单 session 主线为主。
 
@@ -163,6 +175,7 @@ Phase 2 的交付原则不是“一次把所有基础设施补齐”，而是先
 
 - 新任务类型
   - `web_action`：用于通用网页自动化任务。
+  - `ops_qa`：用于基于 Obsidian 本地 vault 的运维知识问答；Phase 2 只保留占位计划与接口边界。
   - 现有 `permission_change` 后续可以作为 `web_action` 的高风险特化场景，而不是完全独立另一套执行栈。
 
 - 新核心接口建议
@@ -171,6 +184,7 @@ Phase 2 的交付原则不是“一次把所有基础设施补齐”，而是先
   - `PlaywrightTool.execute(action: BrowserAction) -> BrowserObservation`
   - `ContextCompressor.compress(session, steps) -> SessionSummary`
   - `MemoryStore.load(session_id) / save(session_state)`
+  - `KnowledgeTool.query(question, context) -> KnowledgeAnswer`
   - `RiskEvaluator.classify(action, observation) -> RiskLevel`
 
 - 结构化动作接口
@@ -181,6 +195,16 @@ Phase 2 的交付原则不是“一次把所有基础设施补齐”，而是先
 - 状态模型
   - `TaskState { planning | acting | observing | awaiting_confirmation | blocked | completed | failed }`
   - `ActionResult { success | retryable_failure | terminal_failure | blocked_for_confirmation | blocked_for_unknown_risk }`
+
+- 知识库配置接口预留
+  - `knowledge.vault_path`：外部 Obsidian vault 本地路径。
+  - `knowledge.include_patterns`：默认匹配 `*.md`。
+  - `knowledge.exclude_patterns`：默认排除 `.obsidian/`、附件目录、归档目录和敏感目录。
+  - `knowledge.index_mode`：预留 `keyword | vector | hybrid`，未来默认使用 `hybrid`。
+
+- 知识库结果接口预留
+  - `KnowledgeAnswer { answer, sources, confidence, missing_info }`
+  - `KnowledgeSource { title, path, section, matched_text }`
 
 ### Test Plan
 
@@ -223,6 +247,12 @@ Phase 2 的交付原则不是“一次把所有基础设施补齐”，而是先
   - 断言：现有 `inspection` 流程不被破坏；分类失败时仍有合理降级路径；非网页任务仍可按当前 Phase 1 能力执行或拒绝。
   - 通过标准：现有核心回归用例全部通过。
 
+- Obsidian vault 接口预留
+  - 场景：配置存在、未配置、路径不存在、路径无权限、匹配空结果。
+  - 断言：Phase 2 可返回清晰占位或能力边界说明，不误报已完成真实知识检索。
+  - 通过标准：`ops_qa` 不触发任何变更动作；错误信息可读；日志不泄露 vault 内敏感内容。
+  - 后续实现验收建议：使用临时测试 vault 覆盖 Markdown 标题、frontmatter、标签、双链、SOP 章节和来源引用。
+
 - 阶段验收标准
   - P0 验收基线：固定测试基座上的只读任务成功率 >= 80%，0 次未确认写操作，所有失败/阻塞均有 artifact 和状态记录。
   - P1 验收基线：session 恢复、登录态复用、上下文压缩在固定场景上稳定可复现。
@@ -234,5 +264,7 @@ Phase 2 的交付原则不是“一次把所有基础设施补齐”，而是先
 - Playwright 作为新增依赖引入，浏览器运行环境与安装流程需要在实施前补充到工程文档。
 - Browser Agent 采用“高度自主浏览”的用户体验目标，但底层必须是受限动作集合，不允许模型直接生成任意自动化代码执行。
 - 记忆先做到任务级 + 会话级，不引入长期跨会话用户画像。
+- 运维知识库基于 Obsidian 本地 vault 构建；Phase 2 只预留配置和接口，不实现完整混合检索。
+- 真实 vault 通过外部路径配置接入，仓库 `knowledge/` 仅用于模板、样例和测试数据。
 - 登录默认支持账号密码，但 MFA、验证码和扫码登录统一视为人工接管场景。
 - 任何可能产生远端副作用的动作都必须人工确认，这是本阶段的默认安全基线。

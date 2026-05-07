@@ -4,7 +4,7 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 
-from aiops_agent.tasks.models import Task
+from aiops_agent.tasks.models import ExecutionPlan, Task, TaskArtifact, ToolCallSpec
 
 
 class FileTaskStore:
@@ -24,4 +24,19 @@ class FileTaskStore:
             return None
         with path.open("r", encoding="utf-8") as handle:
             raw = json.load(handle)
+        raw["artifacts"] = [
+            item if isinstance(item, TaskArtifact) else TaskArtifact(**item)
+            for item in raw.get("artifacts", [])
+        ]
+        raw["tool_calls"] = [
+            item if isinstance(item, ToolCallSpec) else ToolCallSpec(**item)
+            for item in raw.get("tool_calls", [])
+        ]
+        if isinstance(raw.get("plan"), dict):
+            plan = dict(raw["plan"])
+            plan["tool_calls"] = [
+                item if isinstance(item, ToolCallSpec) else ToolCallSpec(**item)
+                for item in plan.get("tool_calls", [])
+            ]
+            raw["plan"] = ExecutionPlan(**plan)
         return Task(**raw)

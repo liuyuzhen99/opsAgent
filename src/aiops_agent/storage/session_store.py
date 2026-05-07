@@ -17,6 +17,7 @@ class FileSessionStore:
         if session_id:
             session = self.load(session_id)
             if session is not None:
+                session.status = "active"
                 return session
             return AgentSession(id=session_id)
         return AgentSession()
@@ -27,6 +28,9 @@ class FileSessionStore:
             return None
         with path.open("r", encoding="utf-8") as handle:
             raw = json.load(handle)
+        raw.setdefault("status", "active")
+        raw.setdefault("rolling_summary", "")
+        raw.setdefault("recent_observations", [])
         return AgentSession(**raw)
 
     def save(self, session: AgentSession) -> Path:
@@ -35,3 +39,22 @@ class FileSessionStore:
         with path.open("w", encoding="utf-8") as handle:
             json.dump(asdict(session), handle, ensure_ascii=False, indent=2)
         return path
+
+    def list(self, *, active_only: bool = False) -> list[AgentSession]:
+        sessions = []
+        for path in sorted(self.root.glob("*.json")):
+            session = self.load(path.stem)
+            if session is None:
+                continue
+            if active_only and session.status != "active":
+                continue
+            sessions.append(session)
+        return sessions
+
+    def close(self, session_id: str) -> AgentSession | None:
+        session = self.load(session_id)
+        if session is None:
+            return None
+        session.status = "closed"
+        self.save(session)
+        return session
