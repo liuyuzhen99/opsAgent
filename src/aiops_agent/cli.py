@@ -9,6 +9,7 @@ from aiops_agent.agent.summarizer import ResultSummarizer
 from aiops_agent.audit.logger import FileAuditLogger
 from aiops_agent.browser.agent import BrowserAgentTool
 from aiops_agent.browser.credentials import CredentialError, CredentialStore
+from aiops_agent.browser.planner import BrowserPlanner
 from aiops_agent.browser.site_config import BrowserSiteConfigError, load_browser_sites_config
 from aiops_agent.chat import ChatOptions, ChatRunner
 from aiops_agent.config import (
@@ -232,6 +233,7 @@ def create_controller(
             audit_logger=audit_logger,
             headless=browser_headless,
             credential_store=credential_store,
+            planner=BrowserPlanner(llm_provider=provider),
         ),
         risk_level="controlled_browser",
         description="Run bounded Playwright browser actions with confirmation gates",

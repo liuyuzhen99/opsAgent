@@ -8,7 +8,21 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from aiops_agent.browser.models import BrowserAction
 
 
-AllowedLLMAction = Literal["open_url", "click", "type", "select", "wait_for", "observe_page", "save_artifact", "finish"]
+AllowedLLMAction = Literal[
+    "open_url",
+    "click",
+    "type",
+    "type_username",
+    "type_password",
+    "login_submit",
+    "select",
+    "press",
+    "wait_for",
+    "observe_page",
+    "extract_text",
+    "save_artifact",
+    "finish",
+]
 
 
 class BrowserPlannerOutput(BaseModel):
@@ -27,10 +41,12 @@ class BrowserPlannerOutput(BaseModel):
             parsed = urlparse(self.value or self.target_hint)
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 raise ValueError("open_url requires an absolute http(s) URL")
-        if self.type in {"click", "type", "select"} and not (self.target_hint or self.target_id):
+        if self.type in {"click", "type", "type_username", "type_password", "login_submit", "select"} and not (self.target_hint or self.target_id):
             raise ValueError(f"{self.type} requires target_hint or target_id")
         if self.type in {"type", "select"} and self.value is None:
             raise ValueError(f"{self.type} requires value")
+        if self.type == "press" and not (self.value or self.target_hint):
+            raise ValueError("press requires value or target_hint")
         return self
 
     def to_action(self) -> BrowserAction:
@@ -42,3 +58,10 @@ class BrowserPlannerOutput(BaseModel):
             expected_outcome=self.expected_outcome,
             timeout_ms=self.timeout_ms,
         )
+
+
+class BrowserPlannerDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    thought: str = Field(default="", max_length=1000)
+    action: BrowserPlannerOutput

@@ -6,6 +6,8 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from aiops_agent.browser.llm_planner import BrowserPlannerDecision
+from aiops_agent.browser.models import BrowserAction, BrowserObservation
 from aiops_agent.config import LLMProviderConfig
 from aiops_agent.llm.base import BaseLLMProvider, IntentClassification, LLMError, PlannedTask
 from aiops_agent.support.logging import log_kv
@@ -124,6 +126,105 @@ class LangChainLLMProvider(BaseLLMProvider):
             raise LLMError("LLM returned empty content")
         log_kv(self.logger, logging.INFO, "LangChain model invocation succeeded", role="chat", model=self._resolve_model("chat"))
         return raw_text
+
+    def plan_browser_action(
+        self,
+        *,
+        goal: str,
+        observation: BrowserObservation,
+        steps: list[dict[str, Any]],
+        allowed_domains: list[str],
+        success_criteria: list[str],
+        forbidden_actions: list[str],
+    ) -> BrowserAction:
+        if not self.enabled:
+            raise LLMError("LLM browser planning disabled")
+
+        prompt = (
+            "You are the browser ReAct planner for a controlled enterprise web agent.\n"
+            "Given the user's goal, the current DOM observation, and previous actions, choose exactly one next browser action.\n"
+            "Use the observation's interactive_elements as your DOM affordances. Prefer target_id when present; otherwise use a visible label, placeholder, button text, css=selector, or xpath=selector as target_hint.\n"
+            "On login pages, infer the username field, password field, and login button from the DOM. Use type_username for the username field, type_password for the password field, and login_submit for the login button. Do not output credential values.\n"
+            "If login_submit was just executed and the page still appears to be loading or remains on the login page without a clear error, prefer wait_for or observe_page before declaring finish or retrying login.\n"
+            "After login, continue with ReAct: inspect navigation/menu/table/form DOM, click the most relevant controls, fill search fields from the user's natural language, and extract_text when the requested answer appears in page content.\n"
+            "If the requested answer is already visible in page_text or element context, return finish and put the concise answer in action.value.\n"
+            "Do not repeat observe_page on the same page more than once; choose a concrete click/type/press/extract_text/finish action instead.\n"
+            "Do not invent credentials, bypass captcha/MFA, visit disallowed domains, execute JavaScript, or output unsupported actions.\n"
+            "If the page already satisfies the goal, return finish. If more page content is needed, return extract_text or observe_page.\n"
+            "Schema: {\"thought\": str, \"action\": {\"type\": \"open_url|click|type|type_username|type_password|login_submit|select|press|wait_for|observe_page|extract_text|save_artifact|finish\", "
+            "\"target_hint\": str, \"target_id\": str|null, \"value\": str|null, \"expected_outcome\": str, \"timeout_ms\": int}}\n"
+            f"goal: {goal}\n"
+            f"allowed_domains: {json.dumps(allowed_domains, ensure_ascii=False)}\n"
+            f"success_criteria: {json.dumps(success_criteria, ensure_ascii=False)}\n"
+            f"forbidden_actions: {json.dumps(forbidden_actions, ensure_ascii=False)}\n"
+            f"observation: {json.dumps(self._browser_observation_payload(observation), ensure_ascii=False)}\n"
+            f"previous_steps: {json.dumps(self._browser_steps_payload(steps), ensure_ascii=False)}\n"
+            "Return JSON only."
+        )
+        raw_text = self._invoke_json("browser", prompt)
+        try:
+            parsed = json.loads(self._strip_json_fence(raw_text))
+            decision = BrowserPlannerDecision.model_validate(parsed)
+        except Exception as exc:
+            raise LLMError("LLM returned invalid JSON for browser planning") from exc
+        action = decision.action.to_action()
+        if decision.thought and not action.expected_outcome:
+            action.expected_outcome = decision.thought[:240]
+        return action
+
+    def _browser_observation_payload(self, observation: BrowserObservation) -> dict[str, Any]:
+        return {
+            "url": observation.url,
+            "title": observation.title,
+            "page_type": observation.page_type,
+            "visible_messages": observation.visible_messages[:20],
+            "page_text": observation.page_text[:4000],
+            "forms": observation.forms[:10],
+            "done_signals": observation.done_signals[:10],
+            "interactive_elements": [
+                {
+                    "element_id": element.element_id,
+                    "role": element.role,
+                    "input_type": element.input_type,
+                    "name": element.name,
+                    "text": element.text,
+                    "title": element.title,
+                    "href": element.href,
+                    "placeholder": element.placeholder,
+                    "context": element.context,
+                    "is_enabled": element.is_enabled,
+                    "is_visible": element.is_visible,
+                }
+                for element in observation.interactive_elements[:50]
+            ],
+        }
+
+    def _browser_steps_payload(self, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        payload = []
+        for step in steps[-8:]:
+            action = dict(step.get("action") or {})
+            if action.get("type") in {"type_password", "type_username"} or "password" in str(action.get("target_hint", "")).lower():
+                action["value"] = "***"
+            payload.append(
+                {
+                    "step_index": step.get("step_index"),
+                    "action": action,
+                    "result": step.get("result"),
+                    "error": step.get("error"),
+                }
+            )
+        return payload
+
+    def _strip_json_fence(self, raw_text: str) -> str:
+        stripped = raw_text.strip()
+        if stripped.startswith("```"):
+            lines = stripped.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            return "\n".join(lines).strip()
+        return stripped
 
     def _invoke_json(self, role: str, prompt: str) -> str:
         model = self._build_model(role)

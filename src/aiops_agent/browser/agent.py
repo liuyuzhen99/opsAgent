@@ -93,6 +93,8 @@ class BrowserAgentTool(BaseTool):
                     artifacts.extend(self._artifacts_from_observation(tool.observe(last_action_result="verification blocked", force_artifact=True)))
                     return self._blocked_result("遇到验证码、MFA 或二次校验，需要人工接手。", steps, observation, artifacts)
                 if spec.requires_login and action.type == "login_submit" and observation.page_type == "login":
+                    if not self._login_has_failure_signal(observation) and self._login_still_pending(steps):
+                        continue
                     failed_observation = tool.observe(last_action_result="login failed", force_artifact=True)
                     artifacts.extend(self._artifacts_from_observation(failed_observation))
                     return self._blocked_result("登录失败或仍停留在登录页。", steps, failed_observation, artifacts)
@@ -185,7 +187,7 @@ class BrowserAgentTool(BaseTool):
         if not spec.site_config:
             return f"账号/权限网页工作流缺少站点配置: {spec.site_key}"
         missing = []
-        if spec.workflow in {"create_user", "create_user_and_assign_role"} and not spec.workflow_fields.get("username"):
+        if spec.workflow in {"search_user", "create_user", "create_user_and_assign_role"} and not spec.workflow_fields.get("username"):
             missing.append("username")
         if spec.workflow in {"assign_role", "create_user_and_assign_role"}:
             if not spec.workflow_fields.get("username"):
@@ -389,6 +391,40 @@ class BrowserAgentTool(BaseTool):
                 break
             count += 1
         return count >= threshold
+
+    def _login_still_pending(self, steps: list[dict]) -> bool:
+        login_submits_on_login = 0
+        wait_or_observe_after_submit = 0
+        seen_submit = False
+        for step in steps:
+            action = step.get("action") or {}
+            observation = step.get("observation") or {}
+            action_type = action.get("type")
+            if action_type == "login_submit" and observation.get("page_type") == "login":
+                login_submits_on_login += 1
+                seen_submit = True
+                continue
+            if seen_submit and action_type in {"wait_for", "observe_page"}:
+                wait_or_observe_after_submit += 1
+        return login_submits_on_login <= 1 and wait_or_observe_after_submit < 2
+
+    def _login_has_failure_signal(self, observation: BrowserObservation) -> bool:
+        text = " ".join(observation.visible_messages).lower()
+        return any(
+            keyword in text
+            for keyword in (
+                "错误",
+                "失败",
+                "无效",
+                "不正确",
+                "密码错误",
+                "账号不存在",
+                "incorrect",
+                "invalid",
+                "failed",
+                "error",
+            )
+        )
 
     def _safe_action_dict(self, action: BrowserAction) -> dict:
         payload = asdict(action)

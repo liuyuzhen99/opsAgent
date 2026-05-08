@@ -16,6 +16,10 @@ class InteractiveElement:
     input_type: str = ""
     name: str = ""
     text: str = ""
+    title: str = ""
+    href: str = ""
+    placeholder: str = ""
+    context: str = ""
     locator_strategy: str = ""
     is_enabled: bool = True
     is_visible: bool = True
@@ -42,6 +46,7 @@ class BrowserObservation:
     interactive_elements: list[InteractiveElement] = field(default_factory=list)
     forms: list[dict[str, Any]] = field(default_factory=list)
     visible_messages: list[str] = field(default_factory=list)
+    page_text: str = ""
     last_action_result: str = ""
     blocking_reason: str | None = None
     screenshot_path: str | None = None

@@ -102,10 +102,8 @@ class PlanningService:
                 if host:
                     allowed_domains.append(host)
             has_side_effect = bool(entities.get("has_side_effect"))
-            workflow = entities.get("workflow")
-            workflow_fields = dict(entities.get("workflow_fields") or {})
-            if workflow:
-                has_side_effect = True
+            workflow = None
+            workflow_fields = {}
             risk_level = "unsafe_mutation" if has_side_effect else "safe_read"
             params = {
                 "start_url": start_url,
@@ -118,7 +116,7 @@ class PlanningService:
                 "requires_remote_mutation": has_side_effect,
                 "auto_plan": True,
                 "site_key": entities.get("site_key"),
-                "workflow": workflow,
+                "workflow": None,
                 "workflow_fields": workflow_fields,
                 "site_config": entities.get("site_config") or {},
                 "browser_config_error": entities.get("browser_config_error"),

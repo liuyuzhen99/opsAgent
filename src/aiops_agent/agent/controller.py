@@ -483,7 +483,7 @@ class AgentController:
         call_spec.params.setdefault("trace_id", task.trace_id)
         call_spec.params.setdefault("task_id", task.id)
         call_spec.params.setdefault("session_id", task.session_id)
-        call_spec.params.setdefault("max_steps", task.max_steps)
+        call_spec.params["max_steps"] = task.max_steps
         try:
             tool_result = self.tool_executor.execute(call_spec)
         except ToolError as exc:

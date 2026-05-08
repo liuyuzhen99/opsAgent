@@ -69,6 +69,7 @@ class PlaywrightBrowserTool:
         url = getattr(page, "url", "")
         elements = self._collect_interactive_elements(page)
         messages = self._collect_visible_messages(page)
+        page_text = self._collect_page_text(page)
         observation = BrowserObservation(
             url=url,
             title=title,
@@ -76,6 +77,7 @@ class PlaywrightBrowserTool:
             interactive_elements=elements,
             forms=self._collect_forms(elements),
             visible_messages=messages,
+            page_text=page_text,
             last_action_result=last_action_result,
             done_signals=self._done_signals(title, url, messages),
         )
@@ -156,20 +158,42 @@ class PlaywrightBrowserTool:
 
     def _login_submit(self, action: BrowserAction) -> ActionResult:
         page = self._ensure_page()
+        login_wait_ms = max(action.timeout_ms, 30000)
         click_action = BrowserAction(
             type="click",
             target_hint=action.target_hint or "登录",
+            target_id=action.target_id,
             expected_outcome=action.expected_outcome,
             risk_level="safe_local_edit",
-            timeout_ms=action.timeout_ms,
+            timeout_ms=login_wait_ms,
         )
         try:
+            before_url = page.url
             locator = self._resolve_locator(page, click_action)
-            locator.click(timeout=action.timeout_ms)
+            locator.click(timeout=login_wait_ms)
             try:
-                page.wait_for_load_state("networkidle", timeout=action.timeout_ms)
+                page.wait_for_load_state("domcontentloaded", timeout=login_wait_ms)
             except Exception:
-                page.wait_for_timeout(250)
+                pass
+            try:
+                page.wait_for_function(
+                    """
+                    (beforeUrl) => {
+                      const visiblePasswordInputs = Array.from(document.querySelectorAll('input[type="password"]'))
+                        .filter((el) => {
+                          const style = window.getComputedStyle(el);
+                          const rect = el.getBoundingClientRect();
+                          return style && style.visibility !== 'hidden' && style.display !== 'none'
+                            && rect.width > 0 && rect.height > 0 && el.getClientRects().length > 0;
+                        });
+                      return window.location.href !== beforeUrl || visiblePasswordInputs.length === 0;
+                    }
+                    """,
+                    arg=before_url,
+                    timeout=login_wait_ms,
+                )
+            except Exception:
+                page.wait_for_timeout(1000)
         except Exception as exc:
             observation = self.observe(last_action_result="login_submit failed", force_artifact=True)
             return ActionResult("retryable_failure", observation, error=str(exc))
@@ -204,38 +228,71 @@ class PlaywrightBrowserTool:
         if action.target_id:
             return page.locator(f"[data-aiops-id='{action.target_id}']")
         hint = action.target_hint or ""
-        if action.type == "type" and hint == "__password__":
-            return page.locator("input[type='password']").first
+        if hint.startswith("css="):
+            return self._first_usable_locator(page.locator(hint.removeprefix("css=")))
+        if hint.startswith("xpath="):
+            return self._first_usable_locator(page.locator(hint))
+        if action.type == "type" and (hint == "__password__" or hint in {"密码", "password", "Password"}):
+            return self._first_usable_locator(
+                page.locator(
+                    "input[type='password']"
+                    ":not([name*='pin' i])"
+                    ":not([id*='pin' i])"
+                    ":not([placeholder*='证书'])"
+                    ":not([placeholder*='pin' i])"
+                )
+            )
         if action.type == "type" and hint == "__username__":
-            return page.locator("input:not([type='hidden']):not([type='password'])").first
+            return self._first_usable_locator(page.locator("input:not([type='hidden']):not([type='password'])"))
         if action.type == "type":
-            return page.get_by_label(hint).or_(page.get_by_placeholder(hint)).first
+            exact = page.get_by_label(hint, exact=True).or_(page.get_by_placeholder(hint, exact=True))
+            fallback = page.get_by_label(hint).or_(page.get_by_placeholder(hint))
+            return self._first_usable_locator(exact, fallback)
         if action.type == "click":
             button = page.get_by_role("button", name=hint)
             if button.count() > 0:
-                return button.first
-            return page.get_by_text(hint).first
-        return page.get_by_text(hint).first
+                return self._first_usable_locator(button)
+            return self._first_usable_locator(page.get_by_text(hint, exact=True), page.get_by_text(hint))
+        return self._first_usable_locator(page.get_by_text(hint, exact=True), page.get_by_text(hint))
+
+    def _first_usable_locator(self, *locators):
+        for locator in locators:
+            try:
+                count = min(locator.count(), 20)
+            except Exception:
+                count = 0
+            for index in range(count):
+                candidate = locator.nth(index)
+                try:
+                    if candidate.is_visible() and candidate.is_enabled():
+                        return candidate
+                except Exception:
+                    continue
+        for locator in locators:
+            return locator.first
+        raise RuntimeError("无法定位可交互元素")
 
     def _collect_interactive_elements(self, page) -> list[InteractiveElement]:
         script = """
-        () => Array.from(document.querySelectorAll('a,button,input,select,textarea,[role="button"]'))
+        () => {
+          const elements = Array.from(document.querySelectorAll('a,button,input,select,textarea,[role="button"]'))
           .filter((el) => {
             const style = window.getComputedStyle(el);
-            return style && style.visibility !== 'hidden' && style.display !== 'none';
+            const rect = el.getBoundingClientRect();
+            return style && style.visibility !== 'hidden' && style.display !== 'none'
+              && rect.width > 0 && rect.height > 0 && el.getClientRects().length > 0;
           })
-          .slice(0, 50)
-          .map((el, index) => ({
-            element_id: (() => {
-              const existing = el.getAttribute('data-aiops-id');
-              if (existing) return existing;
-              const generated = `aiops-el-${index}`;
-              el.setAttribute('data-aiops-id', generated);
-              return generated;
-            })(),
+          .slice(0, 80);
+          elements.forEach((el, index) => el.setAttribute('data-aiops-id', `aiops-el-${index}`));
+          return elements.map((el) => ({
+            element_id: el.getAttribute('data-aiops-id'),
             role: el.getAttribute('role') || el.tagName.toLowerCase(),
             input_type: el.getAttribute('type') || '',
-            name: el.getAttribute('aria-label') || el.getAttribute('name') || el.getAttribute('placeholder') || '',
+            name: el.getAttribute('aria-label') || el.getAttribute('name') || el.getAttribute('placeholder') || el.getAttribute('title') || '',
+            title: el.getAttribute('title') || '',
+            href: el.getAttribute('href') || '',
+            placeholder: el.getAttribute('placeholder') || '',
+            context: ((el.closest('form,li,tr,td,th,div,section,nav') || el.parentElement || el).innerText || '').trim().replace(/\\s+/g, ' ').slice(0, 240),
             text: ((() => {
               const inputType = (el.getAttribute('type') || '').toLowerCase();
               const name = `${el.getAttribute('aria-label') || ''} ${el.getAttribute('name') || ''} ${el.getAttribute('placeholder') || ''}`.toLowerCase();
@@ -245,19 +302,47 @@ class PlaywrightBrowserTool:
             locator_strategy: el.getAttribute('data-aiops-id') ? 'data-aiops-id' : 'semantic',
             is_enabled: !el.disabled,
             is_visible: true
-          }))
+          }));
+        }
         """
         try:
             return [InteractiveElement(**item) for item in page.evaluate(script)]
         except Exception:
             return []
 
+    def _collect_page_text(self, page) -> str:
+        script = """
+        () => {
+          const text = (document.body && document.body.innerText) ? document.body.innerText : '';
+          return text.replace(/\\s+/g, ' ').trim().slice(0, 6000);
+        }
+        """
+        try:
+            return str(page.evaluate(script))
+        except Exception:
+            return ""
+
     def _collect_visible_messages(self, page) -> list[str]:
         script = """
-        () => Array.from(document.querySelectorAll('[role="alert"],.error,.message,.toast,h1,h2'))
-          .map((el) => (el.innerText || '').trim())
-          .filter(Boolean)
-          .slice(0, 20)
+        () => {
+          const selectors = [
+            '[role="alert"]', '.error', '.message', '.toast', '.tips', '.tip',
+            '.layui-layer-content', '.el-message', '.ant-message',
+            '[class*="error"]', '[class*="msg"]', '[class*="warn"]',
+            'h1', 'h2'
+          ];
+          const candidates = Array.from(document.querySelectorAll(selectors.join(',')));
+          return candidates
+            .filter((el) => {
+              const style = window.getComputedStyle(el);
+              const rect = el.getBoundingClientRect();
+              return style && style.visibility !== 'hidden' && style.display !== 'none'
+                && rect.width > 0 && rect.height > 0;
+            })
+            .map((el) => (el.innerText || el.textContent || '').trim())
+            .filter(Boolean)
+            .slice(0, 30);
+        }
         """
         try:
             return list(page.evaluate(script))
@@ -303,6 +388,7 @@ class PlaywrightBrowserTool:
             f"page_type={observation.page_type}",
             f"blocking_reason={observation.blocking_reason or ''}",
             "messages=" + " | ".join(observation.visible_messages),
+            "page_text=" + observation.page_text[:2000],
             "elements=" + " | ".join(
                 html.escape(element.name or element.text or element.element_id)
                 for element in observation.interactive_elements[:20]

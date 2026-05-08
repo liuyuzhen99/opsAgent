@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
 from urllib.parse import urljoin
 
 from aiops_agent.browser.models import BrowserAction, BrowserObservation, BrowserTaskSpec
 
+if TYPE_CHECKING:
+    from aiops_agent.llm.base import BaseLLMProvider
+
 
 class BrowserPlanner:
+    def __init__(self, llm_provider: BaseLLMProvider | None = None):
+        self.llm_provider = llm_provider
+
     def next_action(
         self,
         spec: BrowserTaskSpec,
@@ -48,9 +55,17 @@ class BrowserPlanner:
                 risk_level="safe_read",
             )
 
+        login_action = self._llm_login_action(spec, observation, steps)
+        if login_action is not None:
+            return login_action
+
         login_action = self._login_action(spec, observation, successful_actions)
         if login_action is not None:
             return login_action
+
+        llm_action = self._llm_action(spec, observation, steps)
+        if llm_action is not None:
+            return llm_action
 
         if spec.requires_remote_mutation:
             return self._remote_mutation_action(spec)
@@ -80,6 +95,68 @@ class BrowserPlanner:
             risk_level="safe_read",
         )
 
+    def _llm_action(
+        self,
+        spec: BrowserTaskSpec,
+        observation: BrowserObservation | None,
+        steps: list[dict],
+        *,
+        allow_login_in_workflow: bool = False,
+    ) -> BrowserAction | None:
+        if observation is None:
+            return None
+        if spec.workflow and not (allow_login_in_workflow and observation.page_type == "login"):
+            return None
+        if self.llm_provider is None or not getattr(self.llm_provider, "enabled", False):
+            return None
+        plan_browser_action = getattr(self.llm_provider, "plan_browser_action", None)
+        if plan_browser_action is None:
+            return None
+        try:
+            action = plan_browser_action(
+                goal=spec.user_goal,
+                observation=observation,
+                steps=steps,
+                allowed_domains=spec.allowed_domains,
+                success_criteria=spec.success_criteria,
+                forbidden_actions=spec.forbidden_actions,
+            )
+        except Exception:
+            return None
+        if not isinstance(action, BrowserAction):
+            return None
+        action.key = action.key or f"llm.step.{len(steps) + 1}"
+        action.expected_outcome = action.expected_outcome or f"根据页面 DOM 和用户目标执行下一步: {spec.user_goal}"
+        return action
+
+    def _llm_login_action(
+        self,
+        spec: BrowserTaskSpec,
+        observation: BrowserObservation | None,
+        steps: list[dict],
+    ) -> BrowserAction | None:
+        if not spec.requires_login or observation is None or observation.page_type != "login":
+            return None
+        action = self._llm_action(spec, observation, steps, allow_login_in_workflow=True)
+        if action is None:
+            return None
+        if action.type == "type_username":
+            if not spec.credential_username:
+                return None
+            action.value = spec.credential_username
+            action.expected_outcome = action.expected_outcome or "由 ReAct DOM 分析定位用户名输入框并填写用户名"
+            return action
+        if action.type == "type_password":
+            if not spec.credential_password:
+                return None
+            action.value = spec.credential_password
+            action.expected_outcome = action.expected_outcome or "由 ReAct DOM 分析定位密码输入框并填写密码"
+            return action
+        if action.type == "login_submit":
+            action.expected_outcome = action.expected_outcome or "由 ReAct DOM 分析定位登录按钮并提交登录"
+            return action
+        return action if action.type in {"observe_page", "wait_for", "finish"} else None
+
     def _login_action(
         self,
         spec: BrowserTaskSpec,
@@ -99,7 +176,7 @@ class BrowserPlanner:
         if "type_username" not in successful_actions:
             return BrowserAction(
                 type="type_username",
-                target_hint=self._username_field(observation),
+                target_hint=self._configured_login_field(spec, "username") or self._username_field(observation),
                 value=spec.credential_username,
                 expected_outcome="填写登录用户名",
                 risk_level="safe_local_edit",
@@ -107,7 +184,7 @@ class BrowserPlanner:
         if "type_password" not in successful_actions:
             return BrowserAction(
                 type="type_password",
-                target_hint=self._password_field(observation),
+                target_hint=self._configured_login_field(spec, "password") or self._password_field(observation),
                 value=spec.credential_password,
                 expected_outcome="填写登录密码",
                 risk_level="safe_local_edit",
@@ -115,11 +192,16 @@ class BrowserPlanner:
         if "login_submit" not in successful_actions:
             return BrowserAction(
                 type="login_submit",
-                target_hint=self._login_button(observation),
+                target_hint=self._configured_login_field(spec, "submit") or self._login_button(observation),
                 expected_outcome="提交登录表单",
                 risk_level="safe_local_edit",
             )
         return None
+
+    def _configured_login_field(self, spec: BrowserTaskSpec, field_name: str) -> str | None:
+        login_fields = spec.site_config.get("login_fields") or {}
+        value = login_fields.get(field_name)
+        return str(value) if value else None
 
     def _remote_mutation_action(self, spec: BrowserTaskSpec) -> BrowserAction:
         return BrowserAction(
@@ -216,6 +298,9 @@ class BrowserPlanner:
                 risk_level="safe_read",
                 key="site.observe",
             )
+        llm_login_action = self._llm_login_action(spec, observation, steps)
+        if llm_login_action is not None:
+            return llm_login_action
         login_action = self._login_action(spec, observation, successful_actions)
         if login_action is not None:
             return login_action
@@ -237,21 +322,82 @@ class BrowserPlanner:
     def _workflow_actions(self, spec: BrowserTaskSpec) -> list[BrowserAction]:
         if spec.workflow == "create_user":
             return self._create_user_actions(spec)
+        if spec.workflow == "search_user":
+            return self._search_user_actions(spec)
         if spec.workflow == "assign_role":
             return self._assign_role_actions(spec)
         if spec.workflow == "create_user_and_assign_role":
             return self._create_user_actions(spec) + self._assign_role_actions(spec)
         return []
 
-    def _create_user_actions(self, spec: BrowserTaskSpec) -> list[BrowserAction]:
-        workflow = self._workflow_config(spec, "create_user")
+    def _base_workflow_actions(self, spec: BrowserTaskSpec, workflow: dict, key_prefix: str, entry_outcome: str) -> list[BrowserAction]:
         actions: list[BrowserAction] = []
         entry_url = self._workflow_url(spec, workflow)
         if entry_url:
-            actions.append(BrowserAction(type="open_url", value=entry_url, expected_outcome="进入用户管理页面", risk_level="safe_read", key="create_user.open"))
+            actions.append(BrowserAction(type="open_url", value=entry_url, expected_outcome=entry_outcome, risk_level="safe_read", key=f"{key_prefix}.open"))
+        for index, target_hint in enumerate(workflow.get("navigation") or [], start=1):
+            actions.append(
+                BrowserAction(
+                    type="click",
+                    target_hint=str(target_hint),
+                    expected_outcome=f"进入工作流导航节点 {target_hint}",
+                    risk_level="safe_read",
+                    key=f"{key_prefix}.nav.{index}",
+                )
+            )
         open_button = workflow.get("open_button")
         if open_button:
-            actions.append(BrowserAction(type="click", target_hint=str(open_button), expected_outcome="打开用户表单", risk_level="safe_local_edit", key="create_user.open_form"))
+            actions.append(
+                BrowserAction(
+                    type="click",
+                    target_hint=str(open_button),
+                    expected_outcome="打开工作流表单",
+                    risk_level="safe_local_edit",
+                    key=f"{key_prefix}.open_form",
+                )
+            )
+        return actions
+
+    def _search_user_actions(self, spec: BrowserTaskSpec) -> list[BrowserAction]:
+        workflow = self._workflow_config(spec, "search_user")
+        actions = self._base_workflow_actions(spec, workflow, "search_user", "进入用户管理页面")
+        for field_key, target_hint in (workflow.get("fields") or {}).items():
+            value = spec.workflow_fields.get(field_key)
+            if value is None:
+                continue
+            actions.append(
+                BrowserAction(
+                    type="type",
+                    target_hint=str(target_hint),
+                    value=str(value),
+                    expected_outcome=f"填写用户查询字段 {field_key}",
+                    risk_level="safe_local_edit",
+                    key=f"search_user.field.{field_key}",
+                )
+            )
+        actions.append(
+            BrowserAction(
+                type="click",
+                target_hint=str(workflow.get("submit_button", "查询")),
+                expected_outcome="执行用户查询并刷新结果列表",
+                risk_level="safe_read",
+                key="search_user.submit",
+            )
+        )
+        actions.append(
+            BrowserAction(
+                type="extract_text",
+                target_hint="用户查询结果",
+                expected_outcome="提取用户查询结果",
+                risk_level="safe_read",
+                key="search_user.extract",
+            )
+        )
+        return actions
+
+    def _create_user_actions(self, spec: BrowserTaskSpec) -> list[BrowserAction]:
+        workflow = self._workflow_config(spec, "create_user")
+        actions = self._base_workflow_actions(spec, workflow, "create_user", "进入用户管理页面")
         for field_key, target_hint in (workflow.get("fields") or {}).items():
             value = spec.workflow_fields.get(field_key)
             if value is None:
@@ -280,13 +426,7 @@ class BrowserPlanner:
 
     def _assign_role_actions(self, spec: BrowserTaskSpec) -> list[BrowserAction]:
         workflow = self._workflow_config(spec, "assign_role")
-        actions: list[BrowserAction] = []
-        entry_url = self._workflow_url(spec, workflow)
-        if entry_url:
-            actions.append(BrowserAction(type="open_url", value=entry_url, expected_outcome="进入用户权限页面", risk_level="safe_read", key="assign_role.open"))
-        open_button = workflow.get("open_button")
-        if open_button:
-            actions.append(BrowserAction(type="click", target_hint=str(open_button), expected_outcome="打开角色分配表单", risk_level="safe_local_edit", key="assign_role.open_form"))
+        actions = self._base_workflow_actions(spec, workflow, "assign_role", "进入用户权限页面")
         for field_key, target_hint in (workflow.get("fields") or {}).items():
             value = spec.workflow_fields.get(field_key)
             if value is None:

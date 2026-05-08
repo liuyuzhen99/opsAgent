@@ -12,11 +12,12 @@ class BrowserSiteConfigError(Exception):
     """Raised when browser site configuration is missing or invalid."""
 
 
-WorkflowName = Literal["create_user", "assign_role", "create_user_and_assign_role"]
+WorkflowName = Literal["search_user", "create_user", "assign_role", "create_user_and_assign_role"]
 
 
 class BrowserWorkflowConfig(BaseModel):
     entry_url: str | None = None
+    navigation: list[str] = Field(default_factory=list)
     open_button: str | None = None
     submit_button: str
     success_signals: list[str] = Field(default_factory=list)

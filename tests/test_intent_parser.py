@@ -41,6 +41,17 @@ def test_parser_routes_account_role_request_to_web_action():
     assert result.entities["workflow_fields"]["role"] == "只读权限"
 
 
+def test_parser_routes_search_user_request_to_read_workflow():
+    parser = IntentParser()
+
+    result = parser.parse("查询用户 alice")
+
+    assert result.intent == "web_action"
+    assert result.entities["workflow"] == "search_user"
+    assert result.entities["workflow_fields"]["username"] == "alice"
+    assert result.entities["has_side_effect"] is False
+
+
 def test_parse_with_llm_when_available():
     class FakeProvider:
         def classify_intent(self, text, defaults):

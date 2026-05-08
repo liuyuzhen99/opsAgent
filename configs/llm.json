@@ -2,7 +2,7 @@
   "provider": "openai",
   "enabled": true,
   "base_url": "https://api.deepseek.com/v1",
-  "api_key": "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "api_key": "sk-9fdc22a0cd39441aae1b3badfec3c120",
   "model": "deepseek-chat",
   "timeout_seconds": 30,
   "max_retries": 3,

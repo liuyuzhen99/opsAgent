@@ -12,6 +12,7 @@
     "visible_messages": [
       "MFA required"
     ],
+    "page_text": "",
     "last_action_result": "verification blocked",
     "blocking_reason": null,
     "screenshot_path": "/tmp/fake-screenshot.png",

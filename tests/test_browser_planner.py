@@ -1,4 +1,4 @@
-from aiops_agent.browser.models import BrowserObservation, BrowserTaskSpec, InteractiveElement
+from aiops_agent.browser.models import BrowserAction, BrowserObservation, BrowserTaskSpec, InteractiveElement
 from aiops_agent.browser.planner import BrowserPlanner
 
 
@@ -117,3 +117,146 @@ def test_planner_generates_login_steps_from_login_observation():
     assert password_action.type == "type_password"
     assert password_action.value == "secret"
     assert submit_action.type == "login_submit"
+
+
+def test_planner_prefers_configured_login_fields():
+    planner = BrowserPlanner()
+    spec = BrowserTaskSpec(
+        start_url="http://example.test/login",
+        user_goal="登录后读取页面",
+        requires_login=True,
+        credential_username="alice",
+        credential_password="secret",
+        site_config={"login_fields": {"username": "账号", "password": "口令", "submit": "立即登录"}},
+    )
+    observation = BrowserObservation(page_type="login")
+    steps = [
+        {"action": {"type": "open_url"}, "result": "success", "observation": {}},
+        {"action": {"type": "observe_page"}, "result": "success", "observation": {}},
+    ]
+
+    username_action = planner.next_action(spec, observation, steps)
+    password_action = planner.next_action(
+        spec,
+        observation,
+        steps + [{"action": {"type": "type_username"}, "result": "success", "observation": {}}],
+    )
+    submit_action = planner.next_action(
+        spec,
+        observation,
+        steps
+        + [
+            {"action": {"type": "type_username"}, "result": "success", "observation": {}},
+            {"action": {"type": "type_password"}, "result": "success", "observation": {}},
+        ],
+    )
+
+    assert username_action.target_hint == "账号"
+    assert password_action.target_hint == "口令"
+    assert submit_action.target_hint == "立即登录"
+
+
+def test_planner_uses_llm_provider_after_dom_observation():
+    class FakeProvider:
+        enabled = True
+
+        def plan_browser_action(self, *, goal, observation, steps, allowed_domains, success_criteria, forbidden_actions):
+            assert goal == "查询用户 alice"
+            assert observation.interactive_elements[0].element_id == "user-filter"
+            assert steps[-1]["action"]["type"] == "observe_page"
+            assert allowed_domains == ["example.test"]
+            return BrowserAction(
+                type="type",
+                target_id="user-filter",
+                value="alice",
+                expected_outcome="在用户名筛选框输入 alice",
+            )
+
+    planner = BrowserPlanner(llm_provider=FakeProvider())
+    spec = BrowserTaskSpec(
+        start_url="http://example.test/users",
+        user_goal="查询用户 alice",
+        allowed_domains=["example.test"],
+        success_criteria=["看到 alice 的用户记录"],
+    )
+    observation = BrowserObservation(
+        url=spec.start_url,
+        page_type="form",
+        interactive_elements=[InteractiveElement(element_id="user-filter", role="input", name="用户名")],
+    )
+    steps = [
+        {"action": {"type": "open_url"}, "result": "success", "observation": {}},
+        {"action": {"type": "observe_page"}, "result": "success", "observation": {}},
+    ]
+
+    action = planner.next_action(spec, observation, steps)
+
+    assert action.type == "type"
+    assert action.target_id == "user-filter"
+    assert action.value == "alice"
+    assert action.key == "llm.step.3"
+
+
+def test_planner_uses_llm_provider_to_locate_login_controls_without_exposing_credentials():
+    calls = []
+
+    class FakeProvider:
+        enabled = True
+
+        def plan_browser_action(self, *, goal, observation, steps, allowed_domains, success_criteria, forbidden_actions):
+            calls.append((goal, observation, steps))
+            if len(calls) == 1:
+                return BrowserAction(type="type_username", target_id="login-user")
+            if len(calls) == 2:
+                return BrowserAction(type="type_password", target_id="login-password")
+            return BrowserAction(type="login_submit", target_id="login-button")
+
+    planner = BrowserPlanner(llm_provider=FakeProvider())
+    spec = BrowserTaskSpec(
+        start_url="http://example.test/login",
+        user_goal="登录后查询用户",
+        requires_login=True,
+        credential_username="alice",
+        credential_password="secret",
+        workflow="search_user",
+        site_config={"workflows": {"search_user": {"submit_button": "查询"}}},
+    )
+    observation = BrowserObservation(
+        page_type="login",
+        interactive_elements=[
+            InteractiveElement(element_id="login-user", role="input", name="账号", input_type="text"),
+            InteractiveElement(element_id="login-password", role="input", name="spa", input_type="password"),
+            InteractiveElement(element_id="login-cert", role="input", name="pinno", input_type="password"),
+            InteractiveElement(element_id="login-button", role="a", text="登录"),
+        ],
+    )
+    steps = [
+        {"action": {"type": "open_url"}, "result": "success", "observation": {}},
+        {"action": {"type": "observe_page"}, "result": "success", "observation": {}},
+    ]
+
+    username_action = planner.next_action(spec, observation, steps)
+    password_action = planner.next_action(
+        spec,
+        observation,
+        steps + [{"action": {"type": "type_username"}, "result": "success", "observation": {}}],
+    )
+    submit_action = planner.next_action(
+        spec,
+        observation,
+        steps
+        + [
+            {"action": {"type": "type_username"}, "result": "success", "observation": {}},
+            {"action": {"type": "type_password"}, "result": "success", "observation": {}},
+        ],
+    )
+
+    assert username_action.type == "type_username"
+    assert username_action.target_id == "login-user"
+    assert username_action.value == "alice"
+    assert password_action.type == "type_password"
+    assert password_action.target_id == "login-password"
+    assert password_action.value == "secret"
+    assert submit_action.type == "login_submit"
+    assert submit_action.target_id == "login-button"
+    assert "secret" not in str(calls)

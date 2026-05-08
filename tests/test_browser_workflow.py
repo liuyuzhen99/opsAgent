@@ -10,8 +10,15 @@ SITE_CONFIG = {
     "workflows": {
         "create_user": {
             "entry_url": "/users",
+            "navigation": ["用户管理"],
             "open_button": "新建用户",
             "submit_button": "保存用户",
+            "fields": {"username": "用户名"},
+        },
+        "search_user": {
+            "entry_url": "/users",
+            "navigation": ["用户管理"],
+            "submit_button": "查询",
             "fields": {"username": "用户名"},
         },
         "assign_role": {
@@ -38,7 +45,7 @@ class WorkflowFakeBrowser:
         if action.type in {"click", "type", "select", "observe_page"}:
             self.current = BrowserObservation(url=self.current.url, title="Workflow", page_type="form")
             return ActionResult("success", self.current)
-        if action.type in {"save_artifact", "finish"}:
+        if action.type in {"extract_text", "save_artifact", "finish"}:
             return ActionResult("success", self.current)
         return ActionResult("terminal_failure", self.current, error=f"unexpected {action.type}")
 
@@ -118,3 +125,32 @@ def test_workflow_blocks_without_required_fields(tmp_path):
     assert result.success is False
     assert result.data["status"] == "blocked"
     assert "username" in result.error
+
+
+def test_search_user_workflow_is_read_only_and_completes(tmp_path, monkeypatch):
+    WorkflowFakeBrowser.executed = []
+    monkeypatch.setattr("aiops_agent.browser.agent.PlaywrightBrowserTool", WorkflowFakeBrowser)
+    tool = BrowserAgentTool(audit_logger=FileAuditLogger(tmp_path / "audit.jsonl"), artifact_root=tmp_path / "artifacts")
+
+    result = tool.execute(
+        {
+            "trace_id": "trace",
+            "task_id": "task",
+            "session_id": "session",
+            "start_url": "http://example.test",
+            "user_goal": "查询用户 alice",
+            "allowed_domains": ["example.test"],
+            "auto_plan": True,
+            "site_key": "demo",
+            "workflow": "search_user",
+            "workflow_fields": {"username": "alice"},
+            "site_config": SITE_CONFIG,
+            "max_steps": 12,
+        }
+    )
+
+    assert result.success is True
+    executed = [(action.key, action.type, action.target_hint, action.value) for action in WorkflowFakeBrowser.executed]
+    assert ("search_user.nav.1", "click", "用户管理", None) in executed
+    assert ("search_user.field.username", "type", "用户名", "alice") in executed
+    assert ("search_user.submit", "click", "查询", None) in executed

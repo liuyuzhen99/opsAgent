@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from aiops_agent.browser.models import BrowserAction, BrowserObservation
 
 
 class LLMError(Exception):
@@ -41,4 +44,16 @@ class BaseLLMProvider:
         raise NotImplementedError
 
     def generate_chat_reply(self, text: str, context: dict[str, Any] | None = None) -> str:
+        raise NotImplementedError
+
+    def plan_browser_action(
+        self,
+        *,
+        goal: str,
+        observation: BrowserObservation,
+        steps: list[dict[str, Any]],
+        allowed_domains: list[str],
+        success_criteria: list[str],
+        forbidden_actions: list[str],
+    ) -> BrowserAction:
         raise NotImplementedError

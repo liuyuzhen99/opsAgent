@@ -38,11 +38,16 @@ class IntentParser:
         "新建账号",
         "创建用户",
         "新建用户",
+        "查询用户",
+        "搜索用户",
+        "查找用户",
         "分配角色",
         "分配权限",
         "只读权限",
         "授权",
         "create user",
+        "search user",
+        "find user",
         "assign role",
         "grant",
     )
@@ -164,10 +169,13 @@ class IntentParser:
 
     def _extract_web_workflow(self, text: str) -> str | None:
         lowered = text.lower()
+        search = any(keyword in lowered for keyword in ("查询用户", "搜索用户", "查找用户", "search user", "find user"))
         create = any(keyword in lowered for keyword in ("创建账号", "新建账号", "创建用户", "新建用户", "create user"))
         role = any(keyword in lowered for keyword in ("分配角色", "分配权限", "授权", "只读权限", "assign role", "grant"))
         if create and role:
             return "create_user_and_assign_role"
+        if search:
+            return "search_user"
         if create:
             return "create_user"
         if role:
@@ -179,6 +187,7 @@ class IntentParser:
         username_patterns = (
             r"(?:账号|用户|用户名|user|username)\s*(?:为|叫|是|:|：)?\s*([A-Za-z0-9_.@-]{2,})",
             r"(?:创建账号|新建账号|创建用户|新建用户)\s*([A-Za-z0-9_.@-]{2,})",
+            r"(?:查询用户|搜索用户|查找用户|search user|find user)\s*([A-Za-z0-9_.@-]{2,})",
         )
         for pattern in username_patterns:
             match = re.search(pattern, text, flags=re.IGNORECASE)
