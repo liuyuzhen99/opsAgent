@@ -49,26 +49,29 @@ class PlanningService:
             )
 
         if intent == "ops_qa":
+            conversation_history = list(entities.get("conversation_history") or [])
             return ExecutionPlan(
-                goal="通过 Obsidian vault 知识库工具契约处理运维问答",
+                goal="通过 Obsidian vault 知识库检索并合成运维问答",
                 steps=[
-                    "记录问答请求",
-                    "调用知识库工具检查 vault 配置",
-                    "返回当前阶段能力说明",
+                    "改写查询（消解多轮指代）",
+                    "混合检索知识库文档（BM25 + 向量 RRF 融合）",
+                    "LLM 合成答案并附来源文档",
                 ],
                 selected_tools=["knowledge"],
                 tool_calls=[
                     ToolCallSpec(
                         tool_name="knowledge",
                         action="query",
-                        params={"question": entities.get("raw_text", task_input)},
+                        params={
+                            "question": entities.get("raw_text", task_input),
+                            "conversation_history": conversation_history,
+                        },
                         risk_level="read_only",
                     )
                 ],
                 risk_level="read_only",
                 confirmation_required=False,
-                success_criteria=["给出明确占位反馈，且不误执行任何变更动作"],
-                notes=["知识检索工具将在后续阶段接入。"],
+                success_criteria=["返回知识库检索答案及来源文档"],
             )
 
         if intent == "general_chat":

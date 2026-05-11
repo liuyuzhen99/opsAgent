@@ -19,5 +19,20 @@
     "robot_uuid": "replace-with-your-shadowbot-robot-uuid",
     "command_timeout_seconds": 10,
     "result_file": ""
+  },
+  "knowledge": {
+    "vault_path": "/Users/randy/Desktop/yili/ops_knowledge/ops_knowledge",
+    "include_patterns": ["*.md"],
+    "exclude_patterns": [
+      ".obsidian/**",
+      "attachments/**",
+      "archive/**",
+      "templates/**"
+    ],
+    "index_mode": "hybrid",
+    "embedding_provider": "huggingface",
+    "embedding_api_key": "",
+    "embedding_model": "BAAI/bge-m3",
+    "embedding_base_url": ""
   }
 }

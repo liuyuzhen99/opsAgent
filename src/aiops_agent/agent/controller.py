@@ -334,6 +334,17 @@ class AgentController:
 
     def _task_plan_node(self, state: OrchestrationState) -> OrchestrationState:
         task = state["task"]
+        session = state["session"]
+
+        if task.intent == "ops_qa":
+            import json
+            raw_turns = session.metadata.get("qa_turns", "")
+            try:
+                qa_turns = json.loads(raw_turns) if raw_turns else []
+            except (json.JSONDecodeError, ValueError):
+                qa_turns = []
+            task.entities["conversation_history"] = qa_turns[-5:]
+
         plan = self.planning_service.plan(task.input, task.intent, task.entities)
         task.plan = plan
         task.selected_tools = plan.selected_tools
@@ -528,6 +539,20 @@ class AgentController:
         task = state["task"]
         session = state["session"]
         session.last_task_id = task.id
+
+        if task.intent == "ops_qa" and task.status == "success":
+            import json
+            answer_block = (task.result or {}).get("data", {}).get("answer", {})
+            answer_text = answer_block.get("answer", "") if isinstance(answer_block, dict) else ""
+            if answer_text:
+                raw_turns = session.metadata.get("qa_turns", "")
+                try:
+                    qa_turns = json.loads(raw_turns) if raw_turns else []
+                except (json.JSONDecodeError, ValueError):
+                    qa_turns = []
+                qa_turns.append({"question": task.input, "answer": answer_text})
+                session.metadata["qa_turns"] = json.dumps(qa_turns[-5:], ensure_ascii=False)
+
         session = self.context_compressor.compress(session, task)
         self.task_manager.persist(task)
         self.session_store.save(session)

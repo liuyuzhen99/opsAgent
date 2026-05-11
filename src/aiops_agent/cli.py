@@ -171,6 +171,15 @@ def build_parser() -> argparse.ArgumentParser:
     confirm_parser.add_argument("--credential-config", dest="credential_config_path", help="Optional local browser credential config file path")
     confirm_parser.add_argument("--browser-sites-config", dest="browser_sites_config_path", help="Optional browser sites config file path")
     confirm_parser.add_argument("--log-level", dest="log_level", default="INFO", help="Runtime log level")
+    knowledge_parser = subparsers.add_parser("knowledge", help="Manage Obsidian vault knowledge index")
+    knowledge_subparsers = knowledge_parser.add_subparsers(dest="knowledge_command", required=True)
+    knowledge_parser.add_argument("--config", dest="config_path", help="Optional RPA config file path")
+    knowledge_parser.add_argument("--llm-config", dest="llm_config_path", help="Optional LLM config file path")
+    knowledge_parser.add_argument("--log-level", dest="log_level", default="INFO", help="Runtime log level")
+    knowledge_index_parser = knowledge_subparsers.add_parser("index", help="Build or rebuild vault index")
+    knowledge_index_parser.add_argument("--force", action="store_true", help="Force rebuild even if index is current")
+    knowledge_query_parser = knowledge_subparsers.add_parser("query", help="Query vault directly (bypasses agent)")
+    knowledge_query_parser.add_argument("question", help="Question to query")
     session_parser = subparsers.add_parser("session", help="Manage local Agent sessions")
     session_subparsers = session_parser.add_subparsers(dest="session_command", required=True)
     list_parser = session_subparsers.add_parser("list", help="List sessions")
@@ -202,9 +211,9 @@ def create_controller(
     )
     registry.register(
         "knowledge",
-        KnowledgeTool(rpa_config.knowledge),
+        KnowledgeTool(rpa_config.knowledge, llm_config=anthropic_config),
         risk_level="read_only",
-        description="Reserved Obsidian vault knowledge query contract",
+        description="Obsidian vault knowledge query via BM25/vector + LLM synthesis",
         tags=["knowledge", "obsidian", "ops_qa"],
     )
 
@@ -269,6 +278,41 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             print(f"已关闭会话: {session.id}")
             return 0
+
+    if args.command == "knowledge":
+        configure_logging(args.log_level.upper())
+        try:
+            rpa_config = load_rpa_config(args.config_path)
+            anthropic_config = load_anthropic_config(args.llm_config_path)
+        except ConfigError as exc:
+            print(f"配置错误: {exc}")
+            return 2
+        from aiops_agent.knowledge.engine import KnowledgeEngine
+        from aiops_agent.tools.knowledge import KnowledgeTool
+        engine = KnowledgeEngine(rpa_config.knowledge, anthropic_config)
+        if args.knowledge_command == "index":
+            force = getattr(args, "force", False)
+            print("正在构建知识库索引..." + ("（强制重建）" if force else ""))
+            try:
+                engine.rebuild_index(force=force)
+                print("索引构建完成。")
+            except Exception as exc:
+                print(f"索引构建失败: {exc}")
+                return 1
+            return 0
+        if args.knowledge_command == "query":
+            try:
+                answer = engine.query(args.question)
+            except Exception as exc:
+                print(f"查询失败: {exc}")
+                return 1
+            print(answer.answer)
+            if answer.sources:
+                print("\n来源文档：")
+                for src in answer.sources:
+                    print(f"  - {src.title} ({src.section})")
+            return 0
+        return 0
 
     if args.command == "confirm":
         configure_logging(args.log_level.upper())

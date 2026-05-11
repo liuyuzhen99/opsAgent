@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install *)",
+      "Bash(pip3 install *)",
+      "Bash(.venv/bin/pip install *)",
+      "Bash(.venv/bin/python -m pytest tests/test_knowledge_tool.py tests/test_intent_parser.py -v)",
+      "Bash(.venv/bin/python -m pytest --tb=short -q)"
+    ]
+  }
+}

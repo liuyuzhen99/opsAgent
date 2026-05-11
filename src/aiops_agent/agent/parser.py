@@ -18,7 +18,12 @@ class IntentResult:
 class IntentParser:
     INSPECTION_KEYWORDS = ("巡检", "检查", "inspect", "inspection")
     PERMISSION_KEYWORDS = ("权限", "授权", "permission", "grant")
-    QA_KEYWORDS = ("怎么", "如何", "why", "what", "知识库", "sop")
+    QA_KEYWORDS = (
+        "怎么", "如何", "why", "what", "知识库", "sop",
+        "是什么", "什么意思", "步骤", "手册", "runbook",
+        "排查", "troubleshoot", "处理", "解决", "原因",
+        "告警", "故障", "incident", "最佳实践",
+    )
     GENERAL_CHAT_KEYWORDS = ("hello", "hi", "你好", "您好", "hey")
     WEB_ACTION_KEYWORDS = (
         "网页",
@@ -153,7 +158,8 @@ class IntentParser:
                 entities={"raw_text": normalized},
             )
 
-        if any(keyword in lowered for keyword in self.QA_KEYWORDS):
+        if (any(keyword in lowered for keyword in self.QA_KEYWORDS)
+                and not any(keyword in lowered for keyword in self.WEB_ACTION_KEYWORDS)):
             return IntentResult(intent="ops_qa", entities={"raw_text": normalized})
 
         if any(keyword in lowered for keyword in self.GENERAL_CHAT_KEYWORDS):

@@ -44,6 +44,11 @@ class KnowledgeConfig:
         default_factory=lambda: [".obsidian/**", "attachments/**", "archive/**", "secrets/**"]
     )
     index_mode: str = "keyword"
+    embedding_provider: str = "openai"
+    embedding_api_key: str = ""
+    embedding_model: str = "text-embedding-3-small"
+    embedding_base_url: str = ""
+    enable_eval: bool = False
 
 
 @dataclass(slots=True)
@@ -177,6 +182,14 @@ def load_rpa_config(config_path: str | None = None) -> RPAConfig:
                 knowledge.get("exclude_patterns", [".obsidian/**", "attachments/**", "archive/**", "secrets/**"])
             ),
             index_mode=knowledge.get("index_mode", "keyword"),
+            embedding_provider=knowledge.get("embedding_provider", "openai"),
+            embedding_api_key=(
+                os.environ.get("OPENAI_API_KEY")
+                or knowledge.get("embedding_api_key", "")
+            ),
+            embedding_model=knowledge.get("embedding_model", "text-embedding-3-small"),
+            embedding_base_url=knowledge.get("embedding_base_url", ""),
+            enable_eval=bool(knowledge.get("enable_eval", False)),
         ),
     )
 

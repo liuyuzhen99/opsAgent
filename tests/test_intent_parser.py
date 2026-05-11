@@ -120,3 +120,51 @@ def test_parse_falls_back_to_rules_when_llm_fails():
     assert result.entities["system"] == "WebLogic"
     assert result.entities["llm_fallback_used"] is True
     assert result.entities["llm_fallback_error"] == "network error"
+
+
+# ---------------------------------------------------------------------------
+# ops_qa intent routing and reverse-filter tests
+# ---------------------------------------------------------------------------
+
+def _rule_parser() -> IntentParser:
+    """Parser with no LLM, uses rule fallback only."""
+    return IntentParser(
+        rpa_config=RPAConfig(
+            inspection=InspectionConfig(default_system="WebLogic", default_env="prod")
+        )
+    )
+
+
+def test_ops_qa_keywords_route_to_ops_qa():
+    parser = _rule_parser()
+    cases = [
+        "WebLogic OOM 如何排查",
+        "排查 JVM 堆满的原因",
+        "部署回滚的步骤是什么",
+        "WebLogic OOM 怎么处理",
+        "告警触发了怎么解决",
+        "runbook 在哪里",
+    ]
+    for text in cases:
+        result = parser.parse(text)
+        assert result.intent == "ops_qa", f"Expected ops_qa for: {text!r}, got {result.intent}"
+
+
+def test_ops_qa_reverse_filter_web_action_keywords():
+    """Phrases containing both QA keywords and web_action keywords should NOT be ops_qa."""
+    parser = _rule_parser()
+    cases = [
+        "如何访问监控控制台",
+        "怎么打开运维页面",
+        "如何登录 WebLogic 控制台",
+    ]
+    for text in cases:
+        result = parser.parse(text)
+        assert result.intent != "ops_qa", f"Expected non-ops_qa for: {text!r}, got {result.intent}"
+
+
+def test_ops_qa_extended_keywords():
+    parser = _rule_parser()
+    assert parser.parse("故障处理手册在哪").intent == "ops_qa"
+    assert parser.parse("最佳实践是什么").intent == "ops_qa"
+    assert parser.parse("incident 复盘报告").intent == "ops_qa"

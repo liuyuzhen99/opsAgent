@@ -33,6 +33,12 @@ class LangChainLLMProvider(BaseLLMProvider):
         prompt = (
             "Parse the enterprise AIOps request into JSON.\n"
             "Schema: {\"intent\": \"inspection|permission_change|ops_qa|web_action|general_chat\", \"entities\": {...}}\n"
+            "Intent definitions:\n"
+            "  inspection: user wants to inspect/check system health or status\n"
+            "  permission_change: user wants to grant/revoke access or permissions\n"
+            "  ops_qa: user asks about ops knowledge, procedures, troubleshooting steps, system explanations, runbooks, or incident handling — does NOT need actual execution\n"
+            "  web_action: user wants to open a browser, visit a URL, click UI elements, fill forms, or automate web operations\n"
+            "  general_chat: greetings, small talk, or requests unrelated to enterprise ops\n"
             "Use general_chat for greetings, small talk, or requests that are not enterprise ops tasks.\n"
             f"text: {text}\n"
             f"default_system: {defaults['system']}\n"

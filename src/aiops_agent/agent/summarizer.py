@@ -10,6 +10,23 @@ class ResultSummarizer:
         data = tool_result.get("data") or {}
         if task.intent == "general_chat":
             return str(data.get("reply") or "你好，我是 opsAgent。")
+        if task.intent == "ops_qa":
+            answer_block = data.get("answer") or {}
+            answer_text = answer_block.get("answer") or ""
+            sources = answer_block.get("sources") or []
+            evaluation = answer_block.get("evaluation")
+            if answer_text:
+                lines = [answer_text]
+                if sources:
+                    lines.append("\n来源文档：")
+                    for src in sources:
+                        lines.append(f"  - {src.get('title', '')} ({src.get('section', '')})")
+                if evaluation:
+                    faith = evaluation.get("faithfulness", 0)
+                    rel = evaluation.get("relevance", 0)
+                    conf = round((faith + rel) / 2, 2)
+                    lines.append(f"\n置信度：{conf} | 忠实度：{faith} | 相关性：{rel}")
+                return "\n".join(lines)
         error = tool_result.get("error") or "无"
         suggestions = self._build_suggestion(task.status, data, error)
         lines = [
