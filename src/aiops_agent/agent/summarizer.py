@@ -27,6 +27,11 @@ class ResultSummarizer:
                     conf = round((faith + rel) / 2, 2)
                     lines.append(f"\n置信度：{conf} | 忠实度：{faith} | 相关性：{rel}")
                 return "\n".join(lines)
+        if task.intent == "web_action":
+            answer_block = data.get("answer") or {}
+            answer_text = answer_block.get("answer") if isinstance(answer_block, dict) else ""
+            if answer_text:
+                return str(answer_text)
         error = tool_result.get("error") or "无"
         suggestions = self._build_suggestion(task.status, data, error)
         lines = [

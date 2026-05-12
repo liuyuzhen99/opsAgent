@@ -1,6 +1,8 @@
 from aiops_agent.audit.logger import FileAuditLogger
 from aiops_agent.browser.agent import BrowserAgentTool
-from aiops_agent.browser.models import ActionResult, BrowserObservation
+from aiops_agent.agent.summarizer import ResultSummarizer
+from aiops_agent.browser.models import ActionResult, BrowserAction, BrowserObservation, BrowserTaskSpec, InteractiveElement
+from aiops_agent.tasks.models import Task
 
 
 SITE_CONFIG = {
@@ -154,3 +156,67 @@ def test_search_user_workflow_is_read_only_and_completes(tmp_path, monkeypatch):
     assert ("search_user.nav.1", "click", "用户管理", None) in executed
     assert ("search_user.field.username", "type", "用户名", "alice") in executed
     assert ("search_user.submit", "click", "查询", None) in executed
+
+
+def test_browser_agent_respects_explicit_click_after_field_input(tmp_path):
+    tool = BrowserAgentTool(audit_logger=FileAuditLogger(tmp_path / "audit.jsonl"), artifact_root=tmp_path / "artifacts")
+    spec = BrowserTaskSpec(
+        start_url="http://example.test",
+        user_goal="在客户名称中输入华北公司,然后点击应用按钮,告诉我客户对应的账户编号",
+    )
+    steps = [
+        {
+            "action": {"type": "type", "target_hint": "客户名称", "value": "华北公司"},
+            "result": "success",
+            "observation": {
+                "interactive_elements": [
+                    {
+                        "element_id": "open-search-button",
+                        "role": "button",
+                        "text": "查询",
+                        "is_enabled": True,
+                        "is_visible": True,
+                    },
+                    {
+                        "element_id": "apply-button",
+                        "role": "button",
+                        "text": "应用",
+                        "is_enabled": True,
+                        "is_visible": True,
+                    },
+                ]
+            },
+        }
+    ]
+
+    action = tool._stabilize_action(spec, BrowserAction(type="click", target_hint="查询", target_id="open-search-button"), steps)
+
+    assert action.target_id == "apply-button"
+    assert action.target_hint == "应用"
+
+
+def test_browser_agent_extracts_login_name_answer_and_summarizer_prints_it(tmp_path):
+    tool = BrowserAgentTool(audit_logger=FileAuditLogger(tmp_path / "audit.jsonl"), artifact_root=tmp_path / "artifacts")
+    spec = BrowserTaskSpec(
+        start_url="http://example.test",
+        user_goal="在用户名称中输入高斌,然后点击确定按钮,告诉我用户对应的登录名称",
+    )
+    observation = BrowserObservation(
+        page_text=(
+            "用户列表 用户编号 用户名称 登录名称 所属单位 "
+            "U00005582 网银调试-高斌 gaobin 内蒙古伊利实业集团股份有限公司 "
+            "U00003668 高斌 lilei1 伊利财务有限公司"
+        )
+    )
+
+    answer = tool._answer_from_observation(spec, observation)
+
+    assert answer["query_value"] == "高斌"
+    assert answer["matches"][0]["output_value"] == "gaobin"
+    assert answer["matches"][1]["output_value"] == "lilei1"
+    assert answer["answer"].startswith("高斌 对应的登录名称是 lilei1")
+
+    task = Task(trace_id="trace", input=spec.user_goal, intent="web_action", status="success")
+    report = ResultSummarizer().summarize(task, {"data": {"answer": answer}})
+
+    assert report == answer["answer"]

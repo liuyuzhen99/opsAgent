@@ -226,34 +226,58 @@ class PlaywrightBrowserTool:
 
     def _resolve_locator(self, page, action: BrowserAction):
         if action.target_id:
-            return page.locator(f"[data-aiops-id='{action.target_id}']")
+            return self._first_usable_locator(
+                *[frame.locator(f"[data-aiops-id='{action.target_id}']") for frame in page.frames]
+            )
         hint = action.target_hint or ""
         if hint.startswith("css="):
-            return self._first_usable_locator(page.locator(hint.removeprefix("css=")))
+            selector = hint.removeprefix("css=")
+            return self._first_usable_locator(*[frame.locator(selector) for frame in page.frames])
         if hint.startswith("xpath="):
-            return self._first_usable_locator(page.locator(hint))
+            return self._first_usable_locator(*[frame.locator(hint) for frame in page.frames])
         if action.type == "type" and (hint == "__password__" or hint in {"密码", "password", "Password"}):
             return self._first_usable_locator(
-                page.locator(
-                    "input[type='password']"
-                    ":not([name*='pin' i])"
-                    ":not([id*='pin' i])"
-                    ":not([placeholder*='证书'])"
-                    ":not([placeholder*='pin' i])"
-                )
+                *[
+                    frame.locator(
+                        "input[type='password']"
+                        ":not([name*='pin' i])"
+                        ":not([id*='pin' i])"
+                        ":not([placeholder*='证书'])"
+                        ":not([placeholder*='pin' i])"
+                    )
+                    for frame in page.frames
+                ]
             )
         if action.type == "type" and hint == "__username__":
-            return self._first_usable_locator(page.locator("input:not([type='hidden']):not([type='password'])"))
+            return self._first_usable_locator(
+                *[
+                    frame.locator("input:not([type='hidden']):not([type='password'])")
+                    for frame in page.frames
+                ]
+            )
         if action.type == "type":
-            exact = page.get_by_label(hint, exact=True).or_(page.get_by_placeholder(hint, exact=True))
-            fallback = page.get_by_label(hint).or_(page.get_by_placeholder(hint))
-            return self._first_usable_locator(exact, fallback)
+            exact_locators = []
+            fallback_locators = []
+            for frame in page.frames:
+                exact_locators.append(frame.get_by_label(hint, exact=True).or_(frame.get_by_placeholder(hint, exact=True)))
+                fallback_locators.append(frame.get_by_label(hint).or_(frame.get_by_placeholder(hint)))
+            return self._first_usable_locator(*exact_locators, *fallback_locators)
         if action.type == "click":
-            button = page.get_by_role("button", name=hint)
-            if button.count() > 0:
-                return self._first_usable_locator(button)
-            return self._first_usable_locator(page.get_by_text(hint, exact=True), page.get_by_text(hint))
-        return self._first_usable_locator(page.get_by_text(hint, exact=True), page.get_by_text(hint))
+            button_locators = [frame.get_by_role("button", name=hint) for frame in page.frames]
+            if any(self._locator_has_candidates(locator) for locator in button_locators):
+                return self._first_usable_locator(*button_locators)
+            exact_text = [frame.get_by_text(hint, exact=True) for frame in page.frames]
+            fallback_text = [frame.get_by_text(hint) for frame in page.frames]
+            return self._first_usable_locator(*exact_text, *fallback_text)
+        exact_text = [frame.get_by_text(hint, exact=True) for frame in page.frames]
+        fallback_text = [frame.get_by_text(hint) for frame in page.frames]
+        return self._first_usable_locator(*exact_text, *fallback_text)
+
+    def _locator_has_candidates(self, locator) -> bool:
+        try:
+            return locator.count() > 0
+        except Exception:
+            return False
 
     def _first_usable_locator(self, *locators):
         for locator in locators:
@@ -274,7 +298,8 @@ class PlaywrightBrowserTool:
 
     def _collect_interactive_elements(self, page) -> list[InteractiveElement]:
         script = """
-        () => {
+        ({ idPrefix }) => {
+          document.querySelectorAll('[data-aiops-id]').forEach((el) => el.removeAttribute('data-aiops-id'));
           const elements = Array.from(document.querySelectorAll('a,button,input,select,textarea,[role="button"]'))
           .filter((el) => {
             const style = window.getComputedStyle(el);
@@ -283,7 +308,7 @@ class PlaywrightBrowserTool:
               && rect.width > 0 && rect.height > 0 && el.getClientRects().length > 0;
           })
           .slice(0, 80);
-          elements.forEach((el, index) => el.setAttribute('data-aiops-id', `aiops-el-${index}`));
+          elements.forEach((el, index) => el.setAttribute('data-aiops-id', `${idPrefix}${index}`));
           return elements.map((el) => ({
             element_id: el.getAttribute('data-aiops-id'),
             role: el.getAttribute('role') || el.tagName.toLowerCase(),
@@ -305,10 +330,14 @@ class PlaywrightBrowserTool:
           }));
         }
         """
-        try:
-            return [InteractiveElement(**item) for item in page.evaluate(script)]
-        except Exception:
-            return []
+        elements: list[InteractiveElement] = []
+        for frame_index, frame in enumerate(page.frames):
+            id_prefix = "aiops-el-" if frame == page.main_frame else f"aiops-frame-{frame_index}-el-"
+            try:
+                elements.extend(InteractiveElement(**item) for item in frame.evaluate(script, {"idPrefix": id_prefix}))
+            except Exception:
+                continue
+        return elements[:200]
 
     def _collect_page_text(self, page) -> str:
         script = """
@@ -317,10 +346,15 @@ class PlaywrightBrowserTool:
           return text.replace(/\\s+/g, ' ').trim().slice(0, 6000);
         }
         """
-        try:
-            return str(page.evaluate(script))
-        except Exception:
-            return ""
+        parts = []
+        for frame in page.frames:
+            try:
+                text = str(frame.evaluate(script))
+            except Exception:
+                continue
+            if text:
+                parts.append(text)
+        return " ".join(parts).strip()[:6000]
 
     def _collect_visible_messages(self, page) -> list[str]:
         script = """
@@ -344,10 +378,13 @@ class PlaywrightBrowserTool:
             .slice(0, 30);
         }
         """
-        try:
-            return list(page.evaluate(script))
-        except Exception:
-            return []
+        messages = []
+        for frame in page.frames:
+            try:
+                messages.extend(str(item) for item in frame.evaluate(script))
+            except Exception:
+                continue
+        return messages[:30]
 
     def _collect_forms(self, elements: list[InteractiveElement]) -> list[dict[str, str]]:
         fields = [element for element in elements if element.role in {"input", "select", "textarea"}]

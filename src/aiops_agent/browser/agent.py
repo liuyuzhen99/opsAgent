@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import asdict
 from pathlib import Path
 
@@ -128,6 +129,7 @@ class BrowserAgentTool(BaseTool):
                 data={
                     "status": "completed",
                     "goal": spec.user_goal,
+                    "answer": self._answer_from_observation(spec, final_observation, steps),
                     "last_observation": asdict(final_observation),
                     "steps": steps,
                     "summary": self._execution_summary(spec, steps),
@@ -243,7 +245,7 @@ class BrowserAgentTool(BaseTool):
             observation = tool.observe(last_action_result="repeated action blocked", force_artifact=True)
             artifacts.extend(self._artifacts_from_observation(observation))
             return self._blocked_result("检测到同一页面重复动作超过阈值，已停止执行。", steps, observation, artifacts)
-        proposed_action = action
+        proposed_action = self._stabilize_action(spec, action, steps)
         runtime_action = self._runtime_action(proposed_action)
         risk_level = self.risk_evaluator.classify(runtime_action)
         proposed_action.risk_level = risk_level
@@ -373,6 +375,55 @@ class BrowserAgentTool(BaseTool):
                 key=action.key,
             )
         return action
+
+    def _stabilize_action(self, spec: BrowserTaskSpec, action: BrowserAction, steps: list[dict]) -> BrowserAction:
+        if not steps or action.type != "click":
+            return action
+        expected_click = self._expected_click_after_last_type(spec.user_goal, steps[-1].get("action") or {})
+        if not expected_click:
+            return action
+        current_target = f"{action.target_hint or ''} {action.target_id or ''}"
+        if expected_click in current_target:
+            return action
+        observation = self._observation_from_dict(steps[-1].get("observation") or {})
+        expected = self._find_element(observation, {expected_click})
+        if expected is None:
+            return action
+        return BrowserAction(
+            type="click",
+            target_hint=expected.text or expected.name or expected_click,
+            target_id=expected.element_id,
+            expected_outcome=f"点击用户指定的后续按钮: {expected_click}",
+            risk_level=action.risk_level,
+            requires_confirmation=action.requires_confirmation,
+            timeout_ms=action.timeout_ms,
+            key=action.key or "stabilized.expected_click",
+        )
+
+    def _expected_click_after_last_type(self, goal: str, previous_action: dict) -> str | None:
+        if previous_action.get("type") != "type":
+            return None
+        field = str(previous_action.get("target_hint") or "")
+        value = str(previous_action.get("value") or "")
+        if not field and not value:
+            return None
+        anchors = [anchor for anchor in (value, field) if anchor and anchor in goal]
+        if not anchors:
+            return None
+        start = max(goal.find(anchor) + len(anchor) for anchor in anchors)
+        tail = goal[start:]
+        match = re.search(r"(?:然后|再|并|之后|随后)?[^,，。；;]{0,12}?点击\s*([^,，。；;\s]+?)(?:按钮|$)", tail)
+        if not match:
+            return None
+        label = match.group(1).strip("'\"“”")
+        return label or None
+
+    def _find_element(self, observation: BrowserObservation, labels: set[str]) -> InteractiveElement | None:
+        for element in observation.interactive_elements:
+            text = " ".join(part for part in (element.name, element.text, element.title, element.context) if part)
+            if any(label in text for label in labels) and element.is_enabled and element.is_visible:
+                return element
+        return None
 
     def _is_repeated_action(self, action: BrowserAction, steps: list[dict], threshold: int) -> bool:
         if threshold <= 0:
@@ -508,6 +559,81 @@ class BrowserAgentTool(BaseTool):
 
     def _execution_summary(self, spec: BrowserTaskSpec, steps: list[dict]) -> str:
         return f"目标={spec.user_goal}; steps={len(steps)}; success_criteria={' | '.join(spec.success_criteria)}"
+
+    def _answer_from_observation(self, spec: BrowserTaskSpec, observation: BrowserObservation, steps: list[dict] | None = None) -> dict:
+        contract = self._answer_contract(spec.user_goal)
+        if contract:
+            matches = self._extract_column_matches(
+                observation.page_text,
+                query_field=contract["query_field"],
+                query_value=contract["query_value"],
+                output_field=contract["output_field"],
+            )
+            if matches:
+                exact = [item for item in matches if item["query_value"] == contract["query_value"]]
+                selected = exact or matches
+                if len(selected) == 1:
+                    item = selected[0]
+                    answer = f"{item['query_value']} 对应的{contract['output_field']}是 {item['output_value']}。"
+                else:
+                    answer = "；".join(
+                        f"{item['query_value']} 对应的{contract['output_field']}是 {item['output_value']}" for item in selected
+                    ) + "。"
+                if exact and len(matches) > len(exact):
+                    fuzzy = [item for item in matches if item["query_value"] != contract["query_value"]]
+                    answer += " 另外还匹配到：" + "；".join(
+                        f"{item['query_value']} -> {item['output_value']}" for item in fuzzy
+                    ) + "。"
+                return {"answer": answer, "matches": matches, **contract}
+        finish_answer = self._finish_action_answer(steps or [])
+        if finish_answer:
+            return {"answer": finish_answer}
+        return {}
+
+    def _finish_action_answer(self, steps: list[dict]) -> str | None:
+        for step in reversed(steps):
+            action = step.get("action") or {}
+            if action.get("type") == "finish" and action.get("value"):
+                return str(action["value"])
+        return None
+
+    def _answer_contract(self, goal: str) -> dict[str, str] | None:
+        fill_matches = list(re.finditer(r"(?:在|向)?\s*([^,，。；;\s]{2,20}?)(?:中|里)?(?:输入|填写|填入)\s*([^,，。；;\s]+)", goal))
+        output_field = self._requested_output_field(goal)
+        if not fill_matches or not output_field:
+            return None
+        fill = fill_matches[-1]
+        query_field = fill.group(1).strip("'\"“”")
+        query_value = fill.group(2).strip("'\"“”")
+        return {"query_field": query_field, "query_value": query_value, "output_field": output_field}
+
+    def _requested_output_field(self, goal: str) -> str | None:
+        match = re.search(r"对应的\s*([^,，。；;\s]{2,20})", goal)
+        if match:
+            return match.group(1).strip("'\"“”")
+        match = re.search(r"(?:告诉我|返回|输出)\s*([^,，。；;\s]{2,20})(?:$|[，。；,;])", goal)
+        if match:
+            return match.group(1).strip("'\"“”")
+        return None
+
+    def _extract_column_matches(self, page_text: str, *, query_field: str, query_value: str, output_field: str) -> list[dict]:
+        if query_field not in page_text or output_field not in page_text:
+            return []
+        matches: list[dict] = []
+        pattern = re.compile(r"(U\d{5,})\s+([^\s]+)\s+([A-Za-z][A-Za-z0-9_.-]*)")
+        for match in pattern.finditer(page_text):
+            row_id, candidate_query, candidate_output = match.groups()
+            if query_value in candidate_query:
+                matches.append(
+                    {
+                        "row_id": row_id,
+                        "query_field": query_field,
+                        "query_value": candidate_query,
+                        "output_field": output_field,
+                        "output_value": candidate_output,
+                    }
+                )
+        return matches
 
     def _artifacts_from_observation(self, observation) -> list[TaskArtifact]:
         artifacts = []
