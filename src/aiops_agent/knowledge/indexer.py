@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fnmatch
 import re
+import shutil
 from pathlib import Path
 
 from langchain_core.documents import Document
@@ -21,6 +22,7 @@ from aiops_agent.config import KnowledgeConfig
 class VaultIndexer:
     CHUNK_SIZE = 800
     CHUNK_OVERLAP = 100
+    MANIFEST_SCHEMA_VERSION = 2
 
     def __init__(self, config: KnowledgeConfig):
         self.config = config
@@ -29,7 +31,7 @@ class VaultIndexer:
     def iter_docs(self) -> list[Document]:
         docs: list[Document] = []
         for path in sorted(self.vault.glob("**/*.md")):
-            if self._is_excluded(path):
+            if not self._is_included(path) or self._is_excluded(path):
                 continue
             try:
                 raw = path.read_text(encoding="utf-8")
@@ -68,7 +70,9 @@ class VaultIndexer:
             from langchain_chroma import Chroma  # type: ignore[no-redef]
 
         chunks = self.split_docs(self.iter_docs())
-        persist_dir = str(self.vault / ".chroma")
+        persist_path = self.vault / ".chroma"
+        self._clear_vector_store(persist_path)
+        persist_dir = str(persist_path)
         embeddings = self._make_embeddings()
         db = Chroma.from_documents(chunks, embeddings, persist_directory=persist_dir)
         self._write_manifest()
@@ -100,27 +104,32 @@ class VaultIndexer:
         return OpenAIEmbeddings(**kwargs)
 
     def is_vector_stale(self) -> bool:
-        """Compare current .md mtimes against stored manifest; stale if any file changed."""
+        """Compare current index inputs against stored manifest."""
         manifest_path = self.vault / ".chroma" / "index_manifest.json"
         if not manifest_path.exists():
             return True
 
         import json
         try:
-            manifest: dict[str, float] = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return True
 
-        current: dict[str, float] = {
-            str(p): p.stat().st_mtime
-            for p in self.vault.glob("**/*.md")
-            if not self._is_excluded(p)
-        }
-        return current != manifest
+        if not isinstance(manifest, dict) or "schema_version" not in manifest:
+            return True
+        if manifest.get("schema_version") != self.MANIFEST_SCHEMA_VERSION:
+            return True
+
+        return manifest.get("files") != self._manifest_files() or manifest.get("index_options") != self._manifest_options()
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _is_included(self, path: Path) -> bool:
+        rel = path.relative_to(self.vault).as_posix()
+        patterns = self.config.include_patterns or ["*.md"]
+        return any(fnmatch.fnmatch(rel, pattern) for pattern in patterns)
 
     def _is_excluded(self, path: Path) -> bool:
         rel = path.relative_to(self.vault).as_posix()
@@ -130,8 +139,12 @@ class VaultIndexer:
         return False
 
     def _parse_frontmatter(self, raw: str, path: Path) -> tuple[str, dict]:
-        metadata: dict = {"source": str(path), "rel_path": path.relative_to(self.vault).as_posix()}
+        rel_path = path.relative_to(self.vault).as_posix()
+        metadata: dict = {"source": str(path), "rel_path": rel_path}
         content = raw
+
+        if raw.lstrip().startswith("```yaml\n---"):
+            metadata["has_fenced_frontmatter"] = True
 
         if _YAML_AVAILABLE and raw.startswith("---"):
             match = re.match(r"^---\n(.*?)\n---\n?(.*)", raw, re.DOTALL)
@@ -140,9 +153,7 @@ class VaultIndexer:
                 try:
                     fm = yaml.safe_load(fm_text)
                     if isinstance(fm, dict):
-                        for key in ("title", "tags", "system", "env", "severity", "last_updated"):
-                            if key in fm:
-                                metadata[key] = fm[key]
+                        self._apply_frontmatter(metadata, fm)
                 except yaml.YAMLError:
                     pass
                 content = body.strip()
@@ -150,7 +161,101 @@ class VaultIndexer:
         if "title" not in metadata:
             metadata["title"] = path.stem
 
+        outlinks = self._parse_wikilinks(content) if self.config.obsidian_graph_enabled else []
+        if outlinks:
+            metadata["outlinks_text"] = " ".join(outlinks)
+        if self._is_moc(rel_path):
+            metadata["is_moc"] = True
+
+        if self.config.link_context_enabled:
+            content = self._append_link_context(content, metadata)
+
         return content, metadata
+
+    def _apply_frontmatter(self, metadata: dict, fm: dict) -> None:
+        key_map = {
+            "title": "title",
+            "tags": "tags",
+            "aliases": "aliases",
+            "type": "type",
+            "类型": "type",
+            "system": "system",
+            "系统": "system",
+            "env": "env",
+            "环境": "env",
+            "severity": "severity",
+            "严重度": "severity",
+            "component": "component",
+            "组件": "component",
+            "last_updated": "last_updated",
+        }
+        for source_key, target_key in key_map.items():
+            if source_key in fm:
+                metadata[target_key] = self._metadata_scalar(fm[source_key])
+
+        if "aliases" in metadata:
+            metadata["aliases_text"] = self._metadata_text(metadata["aliases"])
+        if "tags" in metadata:
+            metadata["tags_text"] = self._metadata_text(metadata["tags"])
+
+    def _append_link_context(self, content: str, metadata: dict) -> str:
+        lines: list[str] = []
+        if metadata.get("aliases_text"):
+            lines.append(f"相关别名：{metadata['aliases_text']}")
+        if metadata.get("tags_text"):
+            lines.append(f"相关标签：{metadata['tags_text']}")
+        attrs = [
+            metadata.get("system"),
+            metadata.get("type"),
+            metadata.get("component"),
+            metadata.get("env"),
+            metadata.get("severity"),
+        ]
+        attrs_text = " ".join(str(value) for value in attrs if value)
+        if attrs_text:
+            lines.append(f"相关属性：{attrs_text}")
+        if metadata.get("outlinks_text"):
+            lines.append(f"相关链接：{metadata['outlinks_text']}")
+        if not lines:
+            return content
+        return f"{content.rstrip()}\n\n知识库上下文：\n" + "\n".join(lines)
+
+    def _is_moc(self, rel_path: str) -> bool:
+        return any(fnmatch.fnmatch(rel_path, pattern) for pattern in self.config.moc_patterns)
+
+    @staticmethod
+    def _parse_wikilinks(content: str) -> list[str]:
+        links: list[str] = []
+        for match in re.finditer(r"(!?)\[\[([^\]]+)\]\]", content):
+            if match.group(1):
+                continue
+            target_text = match.group(2).strip()
+            if not target_text:
+                continue
+            target, _, alias = target_text.partition("|")
+            target = target.strip()
+            alias = alias.strip()
+            if target:
+                links.append(target)
+            if alias:
+                links.append(alias)
+        return links
+
+    @staticmethod
+    def _metadata_scalar(value):
+        if isinstance(value, list):
+            return " ".join(str(item) for item in value)
+        if isinstance(value, dict):
+            return " ".join(f"{key}:{item}" for key, item in value.items())
+        return str(value)
+
+    @staticmethod
+    def _metadata_text(value) -> str:
+        if isinstance(value, list):
+            return " ".join(str(item) for item in value)
+        if isinstance(value, dict):
+            return " ".join(f"{key}:{item}" for key, item in value.items())
+        return str(value)
 
     @staticmethod
     def _tokenize(text: str) -> list[str]:
@@ -159,9 +264,34 @@ class VaultIndexer:
     def _write_manifest(self) -> None:
         import json
         manifest = {
-            str(p): p.stat().st_mtime
-            for p in self.vault.glob("**/*.md")
-            if not self._is_excluded(p)
+            "schema_version": self.MANIFEST_SCHEMA_VERSION,
+            "files": self._manifest_files(),
+            "index_options": self._manifest_options(),
         }
         manifest_path = self.vault / ".chroma" / "index_manifest.json"
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _manifest_files(self) -> dict[str, float]:
+        return {
+            str(p): p.stat().st_mtime
+            for p in self.vault.glob("**/*.md")
+            if self._is_included(p) and not self._is_excluded(p)
+        }
+
+    def _manifest_options(self) -> dict:
+        return {
+            "link_context_enabled": self.config.link_context_enabled,
+            "obsidian_graph_enabled": self.config.obsidian_graph_enabled,
+            "moc_patterns": list(self.config.moc_patterns),
+        }
+
+    def _clear_vector_store(self, persist_path: Path) -> None:
+        try:
+            vault = self.vault.resolve()
+            target = persist_path.resolve()
+        except OSError:
+            return
+        if target == vault or vault not in target.parents:
+            return
+        if persist_path.exists():
+            shutil.rmtree(persist_path)

@@ -9,9 +9,10 @@ from langgraph.graph import END, StateGraph
 from aiops_agent.audit.models import AuditEvent
 from aiops_agent.agent.context import ContextCompressor
 from aiops_agent.agent.progress import ProgressEvent
+from aiops_agent.browser.skills import WebSkillGenerationError, WebSkillGenerator, WebSkillSaveResult
 from aiops_agent.support.logging import log_kv
 from aiops_agent.support.trace import get_trace_id
-from aiops_agent.tasks.models import Task
+from aiops_agent.tasks.models import Task, ToolCallSpec, ToolExecutionResult
 from aiops_agent.tasks.manager import TaskManager
 from aiops_agent.tools.base import ToolError
 from aiops_agent.tools.executor import ToolExecutor
@@ -47,6 +48,8 @@ class AgentController:
         policy_engine: PolicyEngine | None = None,
         context_compressor: ContextCompressor | None = None,
         browser_sites_config: BrowserSitesConfig | None = None,
+        web_skill_generator: WebSkillGenerator | None = None,
+        credential_ref_resolver: Callable[[str], str | None] | None = None,
         logger=None,
     ):
         self.parser = parser
@@ -59,6 +62,8 @@ class AgentController:
         self.policy_engine = policy_engine or PolicyEngine()
         self.context_compressor = context_compressor or ContextCompressor()
         self.browser_sites_config = browser_sites_config or BrowserSitesConfig()
+        self.web_skill_generator = web_skill_generator
+        self.credential_ref_resolver = credential_ref_resolver
         self.logger = logger or logging.getLogger(__name__)
         self.graph = self._build_graph()
 
@@ -120,7 +125,7 @@ class AgentController:
                 trace_id=trace_id,
                 task_id=task.id,
                 status=task.status,
-                details={"input": task_input, "session_id": session.id},
+                details={"input": self._audit_task_input(task_input), "session_id": session.id},
             )
         )
         final_state = self.graph.invoke(
@@ -161,6 +166,7 @@ class AgentController:
         call_spec.params = dict(call_spec.params)
         call_spec.params["confirmed_action"] = pending_action
         call_spec.params["replay_actions"] = result_data.get("replay_actions") or []
+        call_spec.params["prior_steps"] = result_data.get("steps") or []
         call_spec.params["completed_action_keys"] = result_data.get("completed_action_keys") or []
         call_spec.params["requires_remote_mutation"] = False
         call_spec.params["start_url"] = result_data.get("resume_url") or call_spec.params.get("start_url")
@@ -239,6 +245,24 @@ class AgentController:
         )
         return task
 
+    def save_web_skill(self, session_id: str | None, name: str | None = None) -> WebSkillSaveResult:
+        if not session_id:
+            raise ValueError("当前还没有 active session，无法保存 skill。")
+        session = self.session_store.load(session_id)
+        if session is None:
+            raise ValueError(f"当前 session 尚未持久化: {session_id}")
+        task_id = session.metadata.get("browser_last_success_task_id")
+        if not task_id:
+            raise ValueError("当前 session 没有最近一次成功的 web_action。")
+        task = self.task_manager.load(task_id)
+        if task is None:
+            raise ValueError(f"最近成功 web_action 任务不存在: {task_id}")
+        generator = self.web_skill_generator or WebSkillGenerator()
+        try:
+            return generator.generate_from_task(task, name=name)
+        except WebSkillGenerationError as exc:
+            raise ValueError(str(exc)) from exc
+
     def _build_graph(self):
         graph = StateGraph(OrchestrationState)
         graph.add_node("intent_parse", self._intent_parse_node)
@@ -280,20 +304,15 @@ class AgentController:
             task.entities["browser_slow_mo_ms"] = int(state["browser_slow_mo_ms"])
         if state.get("browser_site"):
             site_key = str(state["browser_site"])
-            try:
-                site = self.browser_sites_config.get(site_key)
-            except BrowserSiteConfigError as exc:
-                task.intent = "web_action"
-                task.entities["browser_config_error"] = str(exc)
-                task.entities["site_key"] = site_key
-            else:
-                task.intent = "web_action"
-                task.entities["site_key"] = site_key
-                task.entities["site_config"] = site.to_runtime_dict()
-                task.entities["start_url"] = task.entities.get("start_url") or site.login_url or site.base_url
-                existing_domains = list(task.entities.get("allowed_domains") or [])
-                task.entities["allowed_domains"] = sorted(set(existing_domains + site.allowed_domains))
-                task.entities["requires_login"] = bool(site.login_url or site.login_fields)
+            self._apply_browser_site(task, site_key)
+        elif task.intent == "web_action" and not task.entities.get("site_key"):
+            site_key = self._browser_site_key_from_text(task.input)
+            if site_key:
+                self._apply_browser_site(task, site_key)
+        if task.intent == "web_action" and task.entities.get("site_key") and not task.entities.get("credential_ref"):
+            credential_ref = self._default_credential_ref(str(task.entities["site_key"]))
+            if credential_ref:
+                task.entities["credential_ref"] = credential_ref
         task.current_stage = "planning"
         task.status = "planning"
         self.audit_logger.record(
@@ -302,7 +321,7 @@ class AgentController:
                 trace_id=task.trace_id,
                 task_id=task.id,
                 status=task.status,
-                details={"intent": task.intent, "entities": task.entities},
+                details={"intent": task.intent, "entities": self._audit_entities(task.intent, task.entities)},
             )
         )
         log_kv(self.logger, logging.INFO, "Intent parsed", intent=task.intent, task_id=task.id)
@@ -332,11 +351,39 @@ class AgentController:
             "progress_callback": state.get("progress_callback"),
         }
 
+    def _apply_browser_site(self, task: Task, site_key: str) -> None:
+        try:
+            site = self.browser_sites_config.get(site_key)
+        except BrowserSiteConfigError as exc:
+            task.intent = "web_action"
+            task.entities["browser_config_error"] = str(exc)
+            task.entities["site_key"] = site_key
+            return
+        task.intent = "web_action"
+        task.entities["site_key"] = site_key
+        task.entities["site_config"] = site.to_runtime_dict()
+        task.entities["start_url"] = task.entities.get("start_url") or site.login_url or site.base_url
+        existing_domains = list(task.entities.get("allowed_domains") or [])
+        task.entities["allowed_domains"] = sorted(set(existing_domains + site.allowed_domains))
+        task.entities["requires_login"] = bool(task.entities.get("requires_login") or site.login_url or site.login_fields)
+
+    def _browser_site_key_from_text(self, text: str) -> str | None:
+        lowered = text.lower()
+        for site_key in sorted(self.browser_sites_config.sites):
+            if site_key.lower() in lowered:
+                return site_key
+        return None
+
+    def _default_credential_ref(self, site_key: str) -> str | None:
+        if self.credential_ref_resolver is None:
+            return None
+        return self.credential_ref_resolver(site_key)
+
     def _task_plan_node(self, state: OrchestrationState) -> OrchestrationState:
         task = state["task"]
         session = state["session"]
 
-        if task.intent == "ops_qa":
+        if task.intent in {"ops_qa", "knowledge_write"}:
             import json
             raw_turns = session.metadata.get("qa_turns", "")
             try:
@@ -515,6 +562,10 @@ class AgentController:
                     },
                 )
             )
+            fallback_result = self._try_skill_fallback(call_spec, tool_result, task, state.get("progress_callback"))
+            if fallback_result is not None:
+                tool_result = fallback_result
+                task.artifacts.extend(tool_result.artifacts)
             result_status = (tool_result.data or {}).get("status")
             if tool_result.success:
                 self.task_manager.mark_success(task, tool_result.to_dict())
@@ -525,6 +576,76 @@ class AgentController:
             else:
                 self.task_manager.mark_failed(task, tool_result.to_dict())
         return {"task": task, "session": state["session"], "progress_callback": state.get("progress_callback")}
+
+    def _try_skill_fallback(
+        self,
+        call_spec: ToolCallSpec,
+        tool_result: ToolExecutionResult,
+        task: Task,
+        progress_callback: Callable[[ProgressEvent], None] | None,
+    ) -> ToolExecutionResult | None:
+        params = call_spec.params or {}
+        if tool_result.success or not params.get("skill_name"):
+            return None
+        if not params.get("skill_fallback_to_llm_once", True) or params.get("skill_fallback_attempted"):
+            return None
+        result_status = (tool_result.data or {}).get("status")
+        if result_status == "awaiting_confirmation":
+            return None
+        category = self._skill_failure_category(tool_result)
+        if category in {"system_missing_information", "login_failure", "site_unavailable"}:
+            return None
+        fallback_params = dict(params)
+        fallback_params["auto_plan"] = True
+        fallback_params["actions"] = []
+        fallback_params["skill_fallback_attempted"] = True
+        fallback_params["skill_failed_reason"] = tool_result.error or category or "unknown"
+        fallback_call = ToolCallSpec(
+            tool_name=call_spec.tool_name,
+            action=call_spec.action,
+            params=fallback_params,
+            idempotency_key=call_spec.idempotency_key,
+            risk_level=call_spec.risk_level,
+            timeout_seconds=call_spec.timeout_seconds,
+        )
+        self._emit(
+            progress_callback,
+            ProgressEvent(
+                stage="skill.fallback",
+                message="web skill 执行未完成，正在回退 LLM planner 一次。",
+                task_id=task.id,
+                session_id=task.session_id,
+                details={"skill_name": params.get("skill_name"), "failure_category": category},
+            ),
+        )
+        try:
+            fallback_result = self.tool_executor.execute(fallback_call)
+        except ToolError:
+            return None
+        fallback_result.data = dict(fallback_result.data or {})
+        fallback_result.data["skill_fallback"] = {
+            "skill_name": params.get("skill_name"),
+            "original_error": tool_result.error,
+            "failure_category": category,
+            "llm_fallback_used": True,
+        }
+        return fallback_result
+
+    def _skill_failure_category(self, tool_result: ToolExecutionResult) -> str:
+        steps = (tool_result.data or {}).get("steps") or []
+        for step in reversed(steps):
+            reflection = step.get("reflection") or {}
+            category = reflection.get("failure_category")
+            if category and category != "none":
+                return str(category)
+        error = tool_result.error or ""
+        if "无法打开目标网站" in error:
+            return "site_unavailable"
+        if "登录失败" in error:
+            return "login_failure"
+        if "系统中没有" in error:
+            return "system_missing_information"
+        return "execution_failure"
 
     def _summarize_node(self, state: OrchestrationState) -> OrchestrationState:
         task = state["task"]
@@ -552,6 +673,25 @@ class AgentController:
                     qa_turns = []
                 qa_turns.append({"question": task.input, "answer": answer_text})
                 session.metadata["qa_turns"] = json.dumps(qa_turns[-5:], ensure_ascii=False)
+
+        if task.intent == "knowledge_write":
+            data = (task.result or {}).get("data") or {}
+            self.audit_logger.record(
+                AuditEvent(
+                    event_type="knowledge_write.completed",
+                    trace_id=task.trace_id,
+                    task_id=task.id,
+                    status=task.status,
+                    details={
+                        "session_id": task.session_id,
+                        "title": data.get("title"),
+                        "path": data.get("note_path"),
+                        "type": data.get("type"),
+                        "moc": data.get("moc_path"),
+                        "reindex_status": data.get("reindex_status"),
+                    },
+                )
+            )
 
         session = self.context_compressor.compress(session, task)
         self.task_manager.persist(task)
@@ -594,6 +734,48 @@ class AgentController:
     def _emit(self, callback: Callable[[ProgressEvent], None] | None, event: ProgressEvent) -> None:
         if callback is not None:
             callback(event)
+
+    def _audit_task_input(self, task_input: str) -> str:
+        lowered = task_input.lower()
+        write_keywords = (
+            "记录到知识库",
+            "保存到知识库",
+            "添加入知识库",
+            "添加到知识库",
+            "加入知识库",
+            "写入知识库",
+            "录入知识库",
+            "沉淀文档",
+            "写入 vault",
+            "写入vault",
+            "/save-note",
+            "save note",
+            "write note",
+            "save to knowledge",
+            "record to knowledge",
+            "生成知识库",
+            "生成 knowledge",
+            "生成knowledge",
+            "整理成知识库",
+            "整理成 knowledge",
+            "整理成knowledge",
+            "知识沉淀",
+            "knowledge base",
+            "vault",
+        )
+        if any(keyword in lowered for keyword in write_keywords):
+            return "[knowledge_write redacted]"
+        return task_input
+
+    def _audit_entities(self, intent: str, entities: dict) -> dict:
+        if intent != "knowledge_write":
+            return entities
+        return {
+            "system": entities.get("system"),
+            "env": entities.get("env"),
+            "explicit_trigger": bool(entities.get("explicit_trigger")),
+            "dry_run": bool(entities.get("dry_run", False)),
+        }
 
     def _build_placeholder_result(self, task: Task) -> dict:
         if task.intent == "ops_qa":

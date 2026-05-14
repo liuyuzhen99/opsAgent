@@ -14,7 +14,7 @@ from aiops_agent.support.logging import log_kv
 
 
 class LangChainLLMProvider(BaseLLMProvider):
-    SUPPORTED_INTENTS = {"inspection", "permission_change", "ops_qa", "web_action", "general_chat"}
+    SUPPORTED_INTENTS = {"inspection", "permission_change", "ops_qa", "knowledge_write", "web_action", "general_chat"}
 
     def __init__(self, config: LLMProviderConfig):
         self.config = config
@@ -32,13 +32,15 @@ class LangChainLLMProvider(BaseLLMProvider):
 
         prompt = (
             "Parse the enterprise AIOps request into JSON.\n"
-            "Schema: {\"intent\": \"inspection|permission_change|ops_qa|web_action|general_chat\", \"entities\": {...}}\n"
+            "Schema: {\"intent\": \"inspection|permission_change|ops_qa|knowledge_write|web_action|general_chat\", \"entities\": {...}}\n"
             "Intent definitions:\n"
             "  inspection: user wants to inspect/check system health or status\n"
             "  permission_change: user wants to grant/revoke access or permissions\n"
             "  ops_qa: user asks about ops knowledge, procedures, troubleshooting steps, system explanations, runbooks, or incident handling — does NOT need actual execution\n"
+            "  knowledge_write: user explicitly asks to save, record, or distill the current discussion into the Obsidian knowledge vault\n"
             "  web_action: user wants to open a browser, visit a URL, click UI elements, fill forms, or automate web operations\n"
             "  general_chat: greetings, small talk, or requests unrelated to enterprise ops\n"
+            "Use knowledge_write for explicit phrases like 记录到知识库, 保存到知识库, 添加入知识库, 写入知识库, 沉淀文档, 写入 vault, 整理成知识库, or 生成 knowledge.\n"
             "Use general_chat for greetings, small talk, or requests that are not enterprise ops tasks.\n"
             f"text: {text}\n"
             f"default_system: {defaults['system']}\n"
@@ -153,8 +155,11 @@ class LangChainLLMProvider(BaseLLMProvider):
             "On login pages, infer the username field, password field, and login button from the DOM. Use type_username for the username field, type_password for the password field, and login_submit for the login button. Do not output credential values.\n"
             "If login_submit was just executed and the page still appears to be loading or remains on the login page without a clear error, prefer wait_for or observe_page before declaring finish or retrying login.\n"
             "After login, continue with ReAct: inspect navigation/menu/table/form DOM, click the most relevant controls, fill search fields from the user's natural language, and extract_text when the requested answer appears in page content.\n"
+            "Before returning a type/select action, verify the target field label against the user's exact instruction and the observed DOM. Do not confuse neighboring fields such as 用户名称 and 登录名称.\n"
             "Respect explicit action order in the user's goal. If the user says to fill a field and then click a named button, the next click after that fill must target that named visible button, not an earlier search/open button with similar text.\n"
             "When a modal/dialog/popup is open, prefer controls inside the modal over same-named controls in the underlying page.\n"
+            "For searchable dropdowns/select2-style controls: after opening the dropdown, type into the focused/popup search field, then click the matching option inside the open popup; do not click the original select field again.\n"
+            "For 'first result' or 'first row' selection in a table, prefer the checkbox/radio in the first data row when available.\n"
             "If the requested answer is already visible in page_text or element context, return finish and put the concise answer in action.value.\n"
             "For read-only lookup tasks, do not stop at success; finish only after action.value contains the answer requested by the user, or after extract_text has exposed the answer in page_text.\n"
             "Do not repeat observe_page on the same page more than once; choose a concrete click/type/press/extract_text/finish action instead.\n"

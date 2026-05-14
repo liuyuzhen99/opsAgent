@@ -308,6 +308,51 @@ def test_ops_qa_uses_knowledge_contract(tmp_path, monkeypatch):
     assert task.result["data"]["answer"]["missing_info"] == ["knowledge.vault_path"]
 
 
+def test_knowledge_write_runs_full_controller_flow_and_redacts_audit(tmp_path, monkeypatch):
+    config_path = tmp_path / "rpa.json"
+    llm_config_path = tmp_path / "llm.json"
+    vault_path = tmp_path / "vault"
+    vault_path.mkdir()
+    _write_rpa_config(config_path)
+    raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+    raw_config["knowledge"] = {
+        "vault_path": str(vault_path),
+        "index_mode": "keyword",
+        "exclude_patterns": [".obsidian/**", "archive/**", "secrets/**"],
+    }
+    config_path.write_text(json.dumps(raw_config), encoding="utf-8")
+    _write_llm_config(llm_config_path, enabled=True)
+    monkeypatch.chdir(tmp_path)
+
+    def fake_draft(self, instruction, history, *, default_system=None, default_env=None):
+        return {
+            "title": "连接池告警处理",
+            "aliases": ["连接池告警"],
+            "system": default_system or "WebLogic",
+            "type": "runbooks",
+            "env": default_env or "prod",
+            "severity": "P3",
+            "tags": ["weblogic"],
+            "summary": "WebLogic 连接池告警处理方法",
+            "body": "## 处理步骤\n\n1. 查看连接池状态\n2. 释放异常连接",
+            "related_links": [],
+        }
+
+    monkeypatch.setattr("aiops_agent.knowledge.writer.KnowledgeNoteWriter._draft_with_llm", fake_draft)
+
+    controller = create_controller(str(config_path), str(llm_config_path))
+    task = controller.run("请把刚才的 WebLogic 连接池告警处理方法记录到知识库")
+
+    assert task.status == "success"
+    assert task.intent == "knowledge_write"
+    assert "知识笔记已写入" in (task.report or "")
+    assert (vault_path / "runbooks" / "WebLogic - 连接池告警处理.md").exists()
+    audit_text = (tmp_path / "storage" / "audit" / "events.jsonl").read_text(encoding="utf-8")
+    assert "knowledge_write.completed" in audit_text
+    assert "刚才的 WebLogic 连接池告警处理方法" not in audit_text
+    assert "查看连接池状态" not in audit_text
+
+
 def test_general_chat_uses_chat_tool(tmp_path, monkeypatch):
     config_path = tmp_path / "rpa.json"
     llm_config_path = tmp_path / "llm.json"

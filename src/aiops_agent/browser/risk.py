@@ -18,7 +18,6 @@ UNSAFE_HINTS = (
     "删除",
     "创建",
     "开通",
-    "授权",
     "撤销",
     "上传",
     "下载",
@@ -32,6 +31,8 @@ class RiskEvaluator:
         if action.type in {"open_url", "observe_page", "wait_for", "extract_text", "save_artifact", "finish"}:
             return "safe_read"
         if action.type == "login_submit":
+            return "safe_local_edit"
+        if action.type == "press":
             return "safe_local_edit"
         searchable = " ".join(
             item

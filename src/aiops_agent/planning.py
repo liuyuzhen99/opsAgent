@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from urllib.parse import urlparse
 
+from aiops_agent.browser.skills.matcher import WebSkillMatcher
 from aiops_agent.tasks.models import ExecutionPlan, ToolCallSpec
 
 
 class PlanningService:
+    def __init__(self, web_skill_matcher: WebSkillMatcher | None = None):
+        self.web_skill_matcher = web_skill_matcher
+
     def plan(self, task_input: str, intent: str, entities: dict[str, object]) -> ExecutionPlan:
         if intent == "inspection":
             params = {
@@ -74,6 +79,36 @@ class PlanningService:
                 success_criteria=["返回知识库检索答案及来源文档"],
             )
 
+        if intent == "knowledge_write":
+            conversation_history = list(entities.get("conversation_history") or [])
+            return ExecutionPlan(
+                goal="将显式输入和最近问答整理为 Obsidian 知识库主题笔记",
+                steps=[
+                    "读取最近 QA 上下文",
+                    "调用知识写入工具生成结构化主题笔记",
+                    "写入 vault 并更新分类 MOC",
+                    "刷新知识库索引缓存",
+                ],
+                selected_tools=["knowledge_writer"],
+                tool_calls=[
+                    ToolCallSpec(
+                        tool_name="knowledge_writer",
+                        action="write",
+                        params={
+                            "instruction": entities.get("instruction") or entities.get("raw_text", task_input),
+                            "conversation_history": conversation_history,
+                            "dry_run": bool(entities.get("dry_run", False)),
+                            "system": entities.get("system"),
+                            "env": entities.get("env"),
+                        },
+                        risk_level="controlled_change",
+                    )
+                ],
+                risk_level="controlled_change",
+                confirmation_required=False,
+                success_criteria=["返回写入路径、MOC 更新状态和索引更新状态"],
+            )
+
         if intent == "general_chat":
             return ExecutionPlan(
                 goal="在 chat 模式下回复普通对话",
@@ -130,6 +165,27 @@ class PlanningService:
                 "max_steps": int(entities.get("max_steps", 20)),
                 "actions": [],
             }
+            skill_notes: list[str] = []
+            if self.web_skill_matcher is not None:
+                skill_match = self.web_skill_matcher.match(raw_text, entities)
+                if skill_match is not None:
+                    params["auto_plan"] = False
+                    params["actions"] = [asdict(action) for action in skill_match.actions]
+                    params["skill_name"] = skill_match.skill.name
+                    params["skill_score"] = round(skill_match.score, 4)
+                    params["skill_parameters"] = skill_match.parameters
+                    params["skill_fallback_to_llm_once"] = bool(
+                        (skill_match.skill.workflow.get("execution") or {}).get("fallback_to_llm_once", True)
+                    )
+                    params["requires_login"] = bool(
+                        params["requires_login"]
+                        or (skill_match.skill.workflow.get("execution") or {}).get("requires_login", False)
+                    )
+                    if any(action.risk_level in {"unsafe_mutation", "unknown_risk"} for action in skill_match.actions):
+                        risk_level = "unsafe_mutation"
+                    skill_notes.append(
+                        f"命中 web skill: {skill_match.skill.name} score={skill_match.score:.2f}"
+                    )
             return ExecutionPlan(
                 goal="在受控动作集合内执行网页自动化任务",
                 steps=[
@@ -150,7 +206,7 @@ class PlanningService:
                 risk_level=risk_level,
                 confirmation_required=False,
                 success_criteria=["返回结构化 observation", "保存关键 artifact", "审计记录覆盖每一步动作"],
-                notes=["第一版采用规则生成初始动作；后续可接入 LLM Planner 生成同一动作协议。"],
+                notes=skill_notes or ["第一版采用规则生成初始动作；后续可接入 LLM Planner 生成同一动作协议。"],
             )
 
         return ExecutionPlan(

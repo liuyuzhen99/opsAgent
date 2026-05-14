@@ -8,9 +8,16 @@ Requires-Dist: anthropic>=0.40.0
 Requires-Dist: langchain-core>=1.3.0
 Requires-Dist: langchain-anthropic>=1.4.1
 Requires-Dist: langchain-openai>=1.2.0
+Requires-Dist: langchain-community>=0.3.0
 Requires-Dist: langgraph>=1.1.9
 Requires-Dist: pydantic>=2.7.0
 Requires-Dist: playwright>=1.45.0
+Requires-Dist: chromadb>=0.6.0
+Requires-Dist: rank-bm25>=0.2.2
+Requires-Dist: PyYAML>=6.0
+Requires-Dist: prompt_toolkit>=3.0.0
+Requires-Dist: langchain-huggingface>=0.1.0
+Requires-Dist: sentence-transformers>=3.0.0
 
 AIOps Agent MVP 设计文档 v0.1
 

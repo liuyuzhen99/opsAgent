@@ -10,6 +10,7 @@ from aiops_agent.audit.logger import FileAuditLogger
 from aiops_agent.browser.agent import BrowserAgentTool
 from aiops_agent.browser.credentials import CredentialError, CredentialStore
 from aiops_agent.browser.planner import BrowserPlanner
+from aiops_agent.browser.skills import WebSkillGenerator, WebSkillMatcher, WebSkillStore
 from aiops_agent.browser.site_config import BrowserSiteConfigError, load_browser_sites_config
 from aiops_agent.chat import ChatOptions, ChatRunner
 from aiops_agent.config import (
@@ -19,6 +20,7 @@ from aiops_agent.config import (
     validate_startup_config,
 )
 from aiops_agent.llm.client import create_llm_provider
+from aiops_agent.planning import PlanningService
 from aiops_agent.storage.session_store import FileSessionStore
 from aiops_agent.storage.task_store import FileTaskStore
 from aiops_agent.support.logging import configure_logging, get_logger, log_kv
@@ -27,8 +29,12 @@ from aiops_agent.tasks.manager import TaskManager
 from aiops_agent.tools.executor import ToolExecutor
 from aiops_agent.tools.chat import ChatTool
 from aiops_agent.tools.inspection import InspectionTool
-from aiops_agent.tools.knowledge import KnowledgeTool
+from aiops_agent.tools.knowledge import KnowledgeTool, KnowledgeWriteTool
 from aiops_agent.tools.registry import ToolRegistry
+
+
+DEFAULT_BROWSER_MAX_STEPS = 40
+DEFAULT_BROWSER_SLOW_MO_MS = 300
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -83,7 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-steps",
         dest="max_steps",
         type=int,
-        default=20,
+        default=DEFAULT_BROWSER_MAX_STEPS,
         help="Execution step budget",
     )
     run_parser.add_argument(
@@ -120,7 +126,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--browser-slow-mo",
         dest="browser_slow_mo_ms",
         type=int,
-        default=0,
+        default=DEFAULT_BROWSER_SLOW_MO_MS,
         help="Slow down Playwright browser actions by this many milliseconds",
     )
     run_parser.add_argument(
@@ -139,7 +145,7 @@ def build_parser() -> argparse.ArgumentParser:
     chat_parser.add_argument("--log-level", dest="log_level", default="INFO", help="Runtime log level")
     chat_parser.add_argument("--session-id", dest="session_id", help="Optional session ID")
     chat_parser.add_argument("--llm-profile", dest="llm_profile", help="Optional LLM profile name")
-    chat_parser.add_argument("--max-steps", dest="max_steps", type=int, default=20, help="Execution step budget")
+    chat_parser.add_argument("--max-steps", dest="max_steps", type=int, default=DEFAULT_BROWSER_MAX_STEPS, help="Execution step budget")
     chat_parser.add_argument("--allowed-domains", dest="allowed_domains", help="Comma-separated domain allowlist for browser tasks")
     chat_parser.add_argument("--headed", dest="headed", action="store_true", help="Run browser tasks with a visible browser window")
     chat_parser.add_argument("--browser-trace", dest="browser_trace", action="store_true", help="Save Playwright trace for browser tasks")
@@ -155,7 +161,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--browser-slow-mo",
         dest="browser_slow_mo_ms",
         type=int,
-        default=0,
+        default=DEFAULT_BROWSER_SLOW_MO_MS,
         help="Slow down Playwright browser actions by this many milliseconds",
     )
     chat_parser.add_argument(
@@ -180,6 +186,9 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_index_parser.add_argument("--force", action="store_true", help="Force rebuild even if index is current")
     knowledge_query_parser = knowledge_subparsers.add_parser("query", help="Query vault directly (bypasses agent)")
     knowledge_query_parser.add_argument("question", help="Question to query")
+    knowledge_write_parser = knowledge_subparsers.add_parser("write", help="Write a curated note into the configured vault")
+    knowledge_write_parser.add_argument("instruction", help="Instruction or note context to save")
+    knowledge_write_parser.add_argument("--dry-run", dest="dry_run", action="store_true", help="Preview target metadata without writing")
     session_parser = subparsers.add_parser("session", help="Manage local Agent sessions")
     session_subparsers = session_parser.add_subparsers(dest="session_command", required=True)
     list_parser = session_subparsers.add_parser("list", help="List sessions")
@@ -201,6 +210,8 @@ def create_controller(
     anthropic_config = load_anthropic_config(llm_config_path)
     validate_startup_config(rpa_config, anthropic_config)
     registry = ToolRegistry()
+    from aiops_agent.knowledge.engine import KnowledgeEngine
+    knowledge_engine = KnowledgeEngine(rpa_config.knowledge, anthropic_config)
     registry.register(
         "inspection",
         InspectionTool(rpa_config),
@@ -211,10 +222,17 @@ def create_controller(
     )
     registry.register(
         "knowledge",
-        KnowledgeTool(rpa_config.knowledge, llm_config=anthropic_config),
+        KnowledgeTool(rpa_config.knowledge, llm_config=anthropic_config, engine=knowledge_engine),
         risk_level="read_only",
         description="Obsidian vault knowledge query via BM25/vector + LLM synthesis",
         tags=["knowledge", "obsidian", "ops_qa"],
+    )
+    registry.register(
+        "knowledge_writer",
+        KnowledgeWriteTool(rpa_config.knowledge, llm_config=anthropic_config, engine=knowledge_engine),
+        risk_level="controlled_change",
+        description="Write curated Obsidian notes and update MOC",
+        tags=["knowledge", "obsidian", "knowledge_write"],
     )
 
     store = FileTaskStore()
@@ -229,6 +247,9 @@ def create_controller(
     except BrowserSiteConfigError as exc:
         raise ConfigError(str(exc)) from exc
     provider = llm_provider or create_llm_provider(anthropic_config)
+    web_skill_store = WebSkillStore()
+    web_skill_matcher = WebSkillMatcher(web_skill_store)
+    web_skill_generator = WebSkillGenerator(web_skill_store)
     registry.register(
         "chat",
         ChatTool(provider),
@@ -256,7 +277,10 @@ def create_controller(
         summarizer=ResultSummarizer(),
         audit_logger=audit_logger,
         session_store=session_store,
+        planning_service=PlanningService(web_skill_matcher=web_skill_matcher),
         browser_sites_config=browser_sites_config,
+        web_skill_generator=web_skill_generator,
+        credential_ref_resolver=credential_store.default_ref_for_site,
         logger=get_logger(__name__),
     )
 
@@ -288,7 +312,6 @@ def main(argv: list[str] | None = None) -> int:
             print(f"配置错误: {exc}")
             return 2
         from aiops_agent.knowledge.engine import KnowledgeEngine
-        from aiops_agent.tools.knowledge import KnowledgeTool
         engine = KnowledgeEngine(rpa_config.knowledge, anthropic_config)
         if args.knowledge_command == "index":
             force = getattr(args, "force", False)
@@ -312,6 +335,25 @@ def main(argv: list[str] | None = None) -> int:
                 for src in answer.sources:
                     print(f"  - {src.title} ({src.section})")
             return 0
+        if args.knowledge_command == "write":
+            tool = KnowledgeWriteTool(rpa_config.knowledge, anthropic_config, engine=engine)
+            result = tool.execute({"instruction": args.instruction, "dry_run": bool(args.dry_run)})
+            data = result.data or {}
+            if result.success:
+                prefix = "Dry-run 预览完成" if args.dry_run else "知识笔记写入完成"
+                print(f"{prefix}: {data.get('title')}")
+                print(f"笔记路径: {data.get('note_path')}")
+                print(f"类型: {data.get('type')}")
+                print(f"MOC: {data.get('moc_path') or '-'}")
+                print(f"索引状态: {data.get('reindex_status')}")
+                return 0
+            print(f"写入失败: {result.error or '未知错误'}")
+            missing = data.get("missing_info") or []
+            if missing:
+                print("缺失配置: " + ", ".join(missing))
+            if data.get("note_path"):
+                print(f"目标路径: {data.get('note_path')}")
+            return 1
         return 0
 
     if args.command == "confirm":

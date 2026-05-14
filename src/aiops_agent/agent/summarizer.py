@@ -27,6 +27,29 @@ class ResultSummarizer:
                     conf = round((faith + rel) / 2, 2)
                     lines.append(f"\n置信度：{conf} | 忠实度：{faith} | 相关性：{rel}")
                 return "\n".join(lines)
+        if task.intent == "knowledge_write":
+            if tool_result.get("success"):
+                mode = "Dry-run 预览完成" if data.get("dry_run") else "知识笔记已写入"
+                return "\n".join(
+                    [
+                        f"{mode}：{data.get('title') or '-'}",
+                        f"笔记路径：{data.get('note_path') or '-'}",
+                        f"类型：{data.get('type') or '-'}",
+                        f"MOC：{data.get('moc_path') or '-'}",
+                        f"MOC 更新：{'是' if data.get('moc_updated') else '否'}",
+                        f"索引状态：{data.get('reindex_status') or '-'}",
+                    ]
+                )
+            missing = data.get("missing_info") or []
+            lines = [
+                "知识笔记写入失败。",
+                f"原因：{tool_result.get('error') or '未知错误'}",
+            ]
+            if missing:
+                lines.append(f"缺失配置：{', '.join(missing)}")
+            if data.get("note_path"):
+                lines.append(f"目标路径：{data.get('note_path')}")
+            return "\n".join(lines)
         if task.intent == "web_action":
             answer_block = data.get("answer") or {}
             answer_text = answer_block.get("answer") if isinstance(answer_block, dict) else ""

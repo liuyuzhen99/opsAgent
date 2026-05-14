@@ -49,6 +49,21 @@ class KnowledgeConfig:
     embedding_model: str = "text-embedding-3-small"
     embedding_base_url: str = ""
     enable_eval: bool = False
+    obsidian_graph_enabled: bool = True
+    link_context_enabled: bool = True
+    graph_expand_depth: int = 1
+    graph_boost: float = 0.15
+    moc_patterns: list[str] = field(default_factory=lambda: ["*MOC.md", "**/README.md"])
+    write_enabled: bool = True
+    auto_reindex_after_write: bool = True
+    note_type_dirs: dict[str, str] = field(
+        default_factory=lambda: {
+            "incident": "incident",
+            "runbooks": "runbooks",
+            "architecture": "architecture",
+            "guidance": "guidance",
+        }
+    )
 
 
 @dataclass(slots=True)
@@ -190,6 +205,24 @@ def load_rpa_config(config_path: str | None = None) -> RPAConfig:
             embedding_model=knowledge.get("embedding_model", "text-embedding-3-small"),
             embedding_base_url=knowledge.get("embedding_base_url", ""),
             enable_eval=bool(knowledge.get("enable_eval", False)),
+            obsidian_graph_enabled=bool(knowledge.get("obsidian_graph_enabled", True)),
+            link_context_enabled=bool(knowledge.get("link_context_enabled", True)),
+            graph_expand_depth=int(knowledge.get("graph_expand_depth", 1)),
+            graph_boost=float(knowledge.get("graph_boost", 0.15)),
+            moc_patterns=list(knowledge.get("moc_patterns", ["*MOC.md", "**/README.md"])),
+            write_enabled=bool(knowledge.get("write_enabled", True)),
+            auto_reindex_after_write=bool(knowledge.get("auto_reindex_after_write", True)),
+            note_type_dirs=dict(
+                knowledge.get(
+                    "note_type_dirs",
+                    {
+                        "incident": "incident",
+                        "runbooks": "runbooks",
+                        "architecture": "architecture",
+                        "guidance": "guidance",
+                    },
+                )
+            ),
         ),
     )
 

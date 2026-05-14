@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import contextlib
+import gc
 import logging
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from aiops_agent.config import KnowledgeConfig, LLMProviderConfig
 from aiops_agent.knowledge.indexer import VaultIndexer
@@ -15,6 +16,9 @@ logger = logging.getLogger(__name__)
 
 
 class KnowledgeEngine:
+    VECTOR_RETRY_ATTEMPTS = 3
+    VECTOR_RETRY_DELAY_SECONDS = 0.4
+
     def __init__(self, config: KnowledgeConfig, llm_config: LLMProviderConfig):
         self.config = config
         self.llm_config = llm_config
@@ -31,11 +35,10 @@ class KnowledgeEngine:
         rewritten = self._retriever.rewrite_query(question, history)
 
         if self.config.index_mode == "hybrid":
-            bm25, bm25_docs, vector_db = self._get_hybrid()
-            docs = self._retriever.retrieve_hybrid(rewritten, bm25, bm25_docs, vector_db)
+            bm25, bm25_docs = self._get_bm25()
+            docs = self._retrieve_hybrid_with_retry(rewritten, bm25, bm25_docs)
         elif self.config.index_mode == "vector":
-            db = self._get_vector_db()
-            docs = self._retriever.retrieve_vector(rewritten, db)
+            docs = self._retrieve_vector_with_retry(rewritten)
         else:
             bm25, bm25_docs = self._get_bm25()
             docs = self._retriever.retrieve_keyword(rewritten, bm25, bm25_docs)
@@ -71,17 +74,37 @@ class KnowledgeEngine:
     def rebuild_index(self, force: bool = False) -> None:
         if self.config.index_mode == "vector":
             if force or self._indexer.is_vector_stale():
-                self._vector_db = self._indexer.build_vector()
+                self._close_vector_db()
+                self._vector_db = self._build_vector_with_retries()
             else:
-                self._vector_db = self._indexer.load_vector()
+                self._vector_db = self._load_vector_with_retries()
         elif self.config.index_mode == "hybrid":
             self._bm25, self._bm25_docs = self._indexer.build_keyword()
             if force or self._indexer.is_vector_stale():
-                self._vector_db = self._indexer.build_vector()
+                self._close_vector_db()
+                self._vector_db = self._build_vector_with_retries()
             else:
-                self._vector_db = self._indexer.load_vector()
+                self._vector_db = self._load_vector_with_retries()
         else:
             self._bm25, self._bm25_docs = self._indexer.build_keyword()
+
+    def invalidate_cache(self) -> None:
+        self._close_vector_db()
+        self._bm25 = None
+        self._bm25_docs = None
+
+    def reindex_after_write(self) -> str:
+        self.invalidate_cache()
+        if not self.config.auto_reindex_after_write:
+            return "skipped"
+        if self.config.index_mode in {"vector", "hybrid"}:
+            self.rebuild_index(force=True)
+            # Keep the persisted hybrid index, but release the SQLite handle in
+            # the long-lived chat process. The next query will load it lazily.
+            self._close_vector_db()
+            return "rebuilt"
+        self.rebuild_index(force=True)
+        return "cache_refreshed"
 
     # ------------------------------------------------------------------
 
@@ -94,12 +117,81 @@ class KnowledgeEngine:
         if self._vector_db is None:
             chroma_dir = Path(self.config.vault_path) / ".chroma"
             if chroma_dir.exists() and not self._indexer.is_vector_stale():
-                self._vector_db = self._indexer.load_vector()
+                self._vector_db = self._load_vector_with_retries()
             else:
-                self._vector_db = self._indexer.build_vector()
+                self._close_vector_db()
+                self._vector_db = self._build_vector_with_retries()
         return self._vector_db
 
     def _get_hybrid(self):
         bm25, bm25_docs = self._get_bm25()
         vector_db = self._get_vector_db()
         return bm25, bm25_docs, vector_db
+
+    def _retrieve_hybrid_with_retry(self, question: str, bm25, bm25_docs):
+        return self._run_vector_operation_with_retries(
+            "retrieve_hybrid",
+            lambda: self._retriever.retrieve_hybrid(question, bm25, bm25_docs, self._get_vector_db()),
+        )
+
+    def _retrieve_vector_with_retry(self, question: str):
+        return self._run_vector_operation_with_retries(
+            "retrieve_vector",
+            lambda: self._retriever.retrieve_vector(question, self._get_vector_db()),
+        )
+
+    def _build_vector_with_retries(self):
+        return self._run_vector_operation_with_retries("build_vector", self._indexer.build_vector)
+
+    def _load_vector_with_retries(self):
+        return self._run_vector_operation_with_retries("load_vector", self._indexer.load_vector)
+
+    def _run_vector_operation_with_retries(self, operation: str, func):
+        last_error: Exception | None = None
+        for attempt in range(1, self.VECTOR_RETRY_ATTEMPTS + 1):
+            try:
+                return func()
+            except Exception as exc:
+                last_error = exc
+                if not self._is_vector_lock_error(exc) or attempt >= self.VECTOR_RETRY_ATTEMPTS:
+                    raise
+                logger.warning(
+                    "Chroma vector operation failed with a retryable SQLite error; retrying",
+                    extra={
+                        "operation": operation,
+                        "attempt": attempt,
+                        "error": str(exc),
+                    },
+                )
+                self._close_vector_db()
+                time.sleep(self.VECTOR_RETRY_DELAY_SECONDS * attempt)
+        assert last_error is not None
+        raise last_error
+
+    def _close_vector_db(self) -> None:
+        vector_db = self._vector_db
+        self._vector_db = None
+        if vector_db is None:
+            return
+        with contextlib.suppress(Exception):
+            vector_db.persist()
+        client = getattr(vector_db, "_client", None)
+        if client is not None:
+            with contextlib.suppress(Exception):
+                client.close()
+        del vector_db
+        gc.collect()
+
+    @staticmethod
+    def _is_vector_lock_error(exc: Exception) -> bool:
+        text = str(exc).lower()
+        retryable_fragments = (
+            "readonly database",
+            "attempt to write a readonly database",
+            "unable to open database file",
+            "database is locked",
+            "database table is locked",
+            "sqlite",
+            "query error: database error",
+        )
+        return any(fragment in text for fragment in retryable_fragments)

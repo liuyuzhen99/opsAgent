@@ -36,8 +36,9 @@ class ContextCompressor:
         current_page = ""
         if last_observation:
             current_page = last_observation.get("title") or last_observation.get("url") or ""
+        task_input = "知识库写入请求" if task.intent == "knowledge_write" else task.input
         session.rolling_summary = (
-            f"用户目标={task.input}; 已完成动作={','.join(completed[-8:]) or '无'}; "
+            f"用户目标={task_input}; 已完成动作={','.join(completed[-8:]) or '无'}; "
             f"当前页面={current_page or '无'}; 状态={task.status}"
         )
         session.summary = f"last_intent={task.intent}; last_status={task.status}; {session.rolling_summary}"

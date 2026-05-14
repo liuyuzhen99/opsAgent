@@ -139,7 +139,7 @@ class PlaywrightBrowserTool:
         try:
             locator = self._resolve_locator(page, action)
             if action.type == "click":
-                locator.click(timeout=action.timeout_ms)
+                self._click_with_popup_fallback(page, action, locator)
             elif action.type == "type":
                 locator.fill(action.value or "", timeout=action.timeout_ms)
             elif action.type == "select":
@@ -155,6 +155,22 @@ class PlaywrightBrowserTool:
             observation = self.observe(last_action_result=f"{action.type} failed", force_artifact=True)
             return ActionResult("retryable_failure", observation, error=str(exc))
         return ActionResult("success", self.observe(last_action_result=f"{action.type} executed"))
+
+    def _click_with_popup_fallback(self, page, action: BrowserAction, locator) -> None:
+        try:
+            locator.click(timeout=action.timeout_ms)
+            return
+        except Exception as first_error:
+            if self._means_first_result(action.target_hint or ""):
+                try:
+                    locator.dispatch_event("click", timeout=action.timeout_ms)
+                    return
+                except Exception:
+                    pass
+            fallback = self._popup_click_locator(page, action)
+            if fallback is None:
+                raise first_error
+            fallback.click(timeout=action.timeout_ms)
 
     def _login_submit(self, action: BrowserAction) -> ActionResult:
         page = self._ensure_page()
@@ -225,16 +241,15 @@ class PlaywrightBrowserTool:
         return self._page
 
     def _resolve_locator(self, page, action: BrowserAction):
+        hint = action.target_hint or ""
+        if action.type == "click" and self._is_command_hint(hint):
+            command_locator = self._command_click_locator(page, hint)
+            if command_locator is not None:
+                return command_locator
         if action.target_id:
             return self._first_usable_locator(
                 *[frame.locator(f"[data-aiops-id='{action.target_id}']") for frame in page.frames]
             )
-        hint = action.target_hint or ""
-        if hint.startswith("css="):
-            selector = hint.removeprefix("css=")
-            return self._first_usable_locator(*[frame.locator(selector) for frame in page.frames])
-        if hint.startswith("xpath="):
-            return self._first_usable_locator(*[frame.locator(hint) for frame in page.frames])
         if action.type == "type" and (hint == "__password__" or hint in {"密码", "password", "Password"}):
             return self._first_usable_locator(
                 *[
@@ -256,13 +271,38 @@ class PlaywrightBrowserTool:
                 ]
             )
         if action.type == "type":
+            selector_locators = []
             exact_locators = []
             fallback_locators = []
+            field_locators = []
+            dropdown_locators = []
             for frame in page.frames:
+                selector_locators.extend(frame.locator(selector) for selector in self._selector_hints(hint))
                 exact_locators.append(frame.get_by_label(hint, exact=True).or_(frame.get_by_placeholder(hint, exact=True)))
                 fallback_locators.append(frame.get_by_label(hint).or_(frame.get_by_placeholder(hint)))
-            return self._first_usable_locator(*exact_locators, *fallback_locators)
+                field_locators.extend(self._field_locators_for_label(frame, hint))
+                dropdown_locators.extend(self._dropdown_search_locators(frame))
+            return self._first_usable_locator(
+                *selector_locators,
+                *exact_locators,
+                *fallback_locators,
+                *field_locators,
+                *dropdown_locators,
+            )
+        if hint.startswith("css="):
+            selector = hint.removeprefix("css=")
+            return self._first_usable_locator(*[frame.locator(selector) for frame in page.frames])
+        if self._looks_like_css_selector(hint):
+            return self._first_usable_locator(*[frame.locator(hint) for frame in page.frames])
+        if hint.startswith("xpath="):
+            return self._first_usable_locator(*[frame.locator(hint) for frame in page.frames])
         if action.type == "click":
+            popup_locator = self._popup_click_locator(page, action)
+            if popup_locator is not None:
+                return popup_locator
+            first_row_locator = self._first_row_click_locator(page, action)
+            if first_row_locator is not None:
+                return first_row_locator
             button_locators = [frame.get_by_role("button", name=hint) for frame in page.frames]
             if any(self._locator_has_candidates(locator) for locator in button_locators):
                 return self._first_usable_locator(*button_locators)
@@ -278,6 +318,183 @@ class PlaywrightBrowserTool:
             return locator.count() > 0
         except Exception:
             return False
+
+    def _is_command_hint(self, hint: str) -> bool:
+        return hint in {"查询", "取消", "分配岗位", "已分配岗位", "启用/停用", "确定", "关闭"}
+
+    def _command_click_locator(self, page, hint: str):
+        locators = []
+        for frame in page.frames:
+            locators.extend(
+                [
+                    frame.get_by_role("button", name=hint),
+                    frame.locator(f"input[type='button'][value='{hint}']"),
+                    frame.locator(f"input[type='submit'][value='{hint}']"),
+                    frame.locator(f"a:has-text('{hint}')"),
+                    frame.get_by_text(hint, exact=True),
+                ]
+            )
+        return self._first_existing_usable_locator(*locators)
+
+    def _looks_like_css_selector(self, hint: str) -> bool:
+        stripped = hint.strip()
+        if not stripped:
+            return False
+        def starts_with_tag(tag: str) -> bool:
+            return stripped == tag or stripped.startswith(
+                (f"{tag}#", f"{tag}.", f"{tag}[", f"{tag}:", f"{tag} ", f"{tag}>", f"{tag}+")
+            )
+
+        return (
+            stripped.startswith(("#", ".", "["))
+            or "[" in stripped and "]" in stripped
+            or any(starts_with_tag(tag) for tag in ("input", "select", "textarea", "button", "a", "div", "span"))
+        )
+
+    def _selector_hints(self, hint: str) -> list[str]:
+        stripped = hint.strip()
+        if not stripped:
+            return []
+        if stripped.startswith("css="):
+            return [stripped.removeprefix("css=")]
+        if stripped.startswith("xpath="):
+            return [stripped]
+        if not self._looks_like_css_selector(stripped):
+            return []
+        selectors = [stripped]
+        if stripped.startswith("select2-"):
+            selectors.insert(0, f".{stripped}")
+        return list(dict.fromkeys(selectors))
+
+    def _field_locators_for_label(self, frame, label: str):
+        locators = [
+            frame.locator(
+                "xpath="
+                f"//*[normalize-space(.)='{label}']"
+                "/following::input[not(@type='hidden') and not(@disabled) and not(@readonly)][1]"
+            ),
+            frame.locator(
+                "xpath="
+                f"//*[normalize-space(.)='{label}']"
+                "/following::textarea[not(@disabled) and not(@readonly)][1]"
+            ),
+            frame.locator(
+                "xpath="
+                f"//*[contains(normalize-space(.), '{label}')]"
+                "/following::input[not(@type='hidden') and not(@disabled) and not(@readonly)][1]"
+            ),
+        ]
+        semantic_selectors = self._semantic_field_selectors(label)
+        locators.extend(frame.locator(selector) for selector in semantic_selectors)
+        return locators
+
+    def _semantic_field_selectors(self, label: str) -> list[str]:
+        if label in {"用户名", "用户名称"}:
+            return [
+                "input[name='userName']",
+                "input[id='userName']",
+                "input[name*='user' i]:not([type='hidden']):not([type='password'])",
+                "input[id*='user' i]:not([type='hidden']):not([type='password'])",
+            ]
+        if label == "登录名称":
+            return [
+                "input[name*='login' i]:not([type='hidden']):not([type='password'])",
+                "input[id*='login' i]:not([type='hidden']):not([type='password'])",
+            ]
+        return []
+
+    def _popup_click_locator(self, page, action: BrowserAction):
+        hint = action.target_hint or ""
+        locators = []
+        for frame in page.frames:
+            locators.extend(self._popup_option_locators(frame, hint))
+        return self._first_existing_usable_locator(*locators)
+
+    def _first_row_click_locator(self, page, action: BrowserAction):
+        hint = action.target_hint or ""
+        if not self._means_first_result(hint):
+            return None
+        locators = []
+        data_row_selectors = [
+            ".ui-jqgrid-btable tr.jqgrow",
+            "tr.jqgrow",
+            "tbody tr:has(td a)",
+            "table tr:has(td a)",
+            "tbody tr:has(td):not(:has(th))",
+            "tbody tr",
+        ]
+        for frame in page.frames:
+            for row_selector in data_row_selectors:
+                locators.extend(
+                    [
+                        frame.locator(f"{row_selector} input[type='checkbox']").first,
+                        frame.locator(f"{row_selector} input[type='radio']").first,
+                        frame.locator(f"{row_selector} [role='checkbox']").first,
+                        frame.locator(f"{row_selector} [role='radio']").first,
+                    ]
+                )
+            locators.extend(frame.locator(row_selector).first for row_selector in data_row_selectors)
+        return self._first_existing_usable_locator(*locators)
+
+    def _popup_option_locators(self, frame, hint: str):
+        popup_selectors = self._popup_selectors()
+        option_selectors = [
+            "[role='option']",
+            "li",
+            "tr",
+            ".select2-result-label",
+            ".select2-results li",
+            ".el-select-dropdown__item",
+            ".ant-select-item-option",
+        ]
+        if self._means_first_result(hint):
+            return [
+                frame.locator(f"{popup}:visible {option}").first
+                for popup in popup_selectors
+                for option in option_selectors
+            ]
+        text_locators = []
+        if hint:
+            for popup in popup_selectors:
+                popup_locator = frame.locator(f"{popup}:visible")
+                text_locators.append(popup_locator.get_by_text(hint, exact=True))
+                text_locators.append(popup_locator.get_by_text(hint))
+        return text_locators
+
+    def _dropdown_search_locators(self, frame):
+        editable_selectors = [
+            "input:not([type='hidden']):not([type='password']):not([disabled]):not([readonly])",
+            "textarea:not([disabled]):not([readonly])",
+            "[contenteditable='true']",
+        ]
+        popup_selectors = self._popup_selectors()
+        focused_editable = ",".join(f"{selector}:focus" for selector in editable_selectors)
+        return [
+            frame.locator(focused_editable),
+            *[
+                frame.locator(",".join(f"{container}:visible {selector}" for selector in editable_selectors))
+                for container in popup_selectors
+            ],
+        ]
+
+    def _popup_selectors(self) -> list[str]:
+        return [
+            "[role='listbox']",
+            "[role='dialog']",
+            "[class*='select-dropdown']",
+            "[class*='dropdown']",
+            "[class*='popover']",
+            "[class*='popup']",
+            ".select2-drop",
+            ".select2-drop-active",
+            ".el-select-dropdown",
+            ".ant-select-dropdown",
+            ".layui-layer",
+        ]
+
+    def _means_first_result(self, hint: str) -> bool:
+        lowered = hint.lower()
+        return any(token in lowered for token in ("第一个", "第一条", "首个", "first"))
 
     def _first_usable_locator(self, *locators):
         for locator in locators:
@@ -295,6 +512,21 @@ class PlaywrightBrowserTool:
         for locator in locators:
             return locator.first
         raise RuntimeError("无法定位可交互元素")
+
+    def _first_existing_usable_locator(self, *locators):
+        for locator in locators:
+            try:
+                count = min(locator.count(), 20)
+            except Exception:
+                count = 0
+            for index in range(count):
+                candidate = locator.nth(index)
+                try:
+                    if candidate.is_visible() and candidate.is_enabled():
+                        return candidate
+                except Exception:
+                    continue
+        return None
 
     def _collect_interactive_elements(self, page) -> list[InteractiveElement]:
         script = """

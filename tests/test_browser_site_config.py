@@ -1,9 +1,13 @@
 import json
+from types import SimpleNamespace
 
+from aiops_agent.agent.controller import AgentController
+from aiops_agent.agent.parser import IntentParser
 from pydantic import ValidationError
 
 from aiops_agent.browser.llm_planner import BrowserPlannerDecision, BrowserPlannerOutput
 from aiops_agent.browser.site_config import BrowserSitesConfig, load_browser_sites_config
+from aiops_agent.tasks.models import Task
 
 
 def test_browser_sites_config_loads_and_defaults_allowed_domain(tmp_path):
@@ -89,3 +93,59 @@ def test_llm_planner_decision_accepts_react_thought_and_action():
     )
 
     assert decision.action.to_action().target_id == "user-filter"
+
+
+class _FakeAuditLogger:
+    def record(self, event):
+        return None
+
+
+def test_controller_infers_browser_site_and_credential_from_natural_language():
+    sites = BrowserSitesConfig.model_validate(
+        {
+            "sites": {
+                "ifinance": {
+                    "site_key": "ifinance",
+                    "base_url": "http://ifinance.test",
+                    "login_url": "http://ifinance.test/login",
+                    "allowed_domains": ["ifinance.test"],
+                    "login_fields": {"username": "用户名", "password": "密码", "submit": "登录"},
+                    "workflows": {},
+                }
+            }
+        }
+    )
+    controller = AgentController(
+        parser=IntentParser(),
+        task_manager=None,
+        tool_executor=None,
+        summarizer=None,
+        audit_logger=_FakeAuditLogger(),
+        session_store=None,
+        browser_sites_config=sites,
+        credential_ref_resolver=lambda site_key: "ifinance_admin" if site_key == "ifinance" else None,
+    )
+    task = Task(trace_id="trace", input="登录ifinance网站", id="task", session_id="session")
+
+    state = controller._intent_parse_node(
+        {
+            "task": task,
+            "session": SimpleNamespace(id="session"),
+            "allowed_domains": [],
+            "credential_ref": "",
+            "browser_trace": False,
+            "browser_video": False,
+            "browser_site": "",
+            "browser_channel": "",
+            "browser_slow_mo_ms": 0,
+            "progress_callback": None,
+        }
+    )
+
+    parsed = state["task"]
+    assert parsed.intent == "web_action"
+    assert parsed.entities["site_key"] == "ifinance"
+    assert parsed.entities["credential_ref"] == "ifinance_admin"
+    assert parsed.entities["start_url"] == "http://ifinance.test/login"
+    assert parsed.entities["requires_login"] is True
+    assert parsed.entities["allowed_domains"] == ["ifinance.test"]

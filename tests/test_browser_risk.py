@@ -12,3 +12,27 @@ def test_save_artifact_is_safe_even_when_expected_outcome_mentions_save():
 
     assert evaluator.classify(action) == "safe_read"
     assert evaluator.requires_confirmation(action) is False
+
+
+def test_authorization_unit_filter_is_not_treated_as_remote_mutation():
+    evaluator = RiskEvaluator()
+    action = BrowserAction(
+        type="click",
+        target_hint="授权单位",
+        expected_outcome="授权单位下拉列表展开，显示可选单位列表",
+    )
+
+    assert evaluator.classify(action) == "safe_local_edit"
+    assert evaluator.requires_confirmation(action) is False
+
+
+def test_press_escape_is_safe_even_when_expected_outcome_mentions_remove_overlay():
+    evaluator = RiskEvaluator()
+    action = BrowserAction(
+        type="press",
+        value="Escape",
+        expected_outcome="Close the select2 dropdown and remove the overlay mask",
+    )
+
+    assert evaluator.classify(action) == "safe_local_edit"
+    assert evaluator.requires_confirmation(action) is False

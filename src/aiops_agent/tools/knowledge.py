@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from aiops_agent.config import KnowledgeConfig, LLMProviderConfig
+from aiops_agent.knowledge.writer import KnowledgeNoteWriter
 from aiops_agent.tasks.models import ToolExecutionResult
 from aiops_agent.tools.base import BaseTool
 
@@ -14,6 +15,8 @@ class KnowledgeSource:
     path: str
     section: str = ""
     matched_text: str = ""
+    relation: str = "direct"
+    related_to: str = ""
 
 
 @dataclass(slots=True)
@@ -26,9 +29,15 @@ class KnowledgeAnswer:
 
 
 class KnowledgeTool(BaseTool):
-    def __init__(self, config: KnowledgeConfig, llm_config: LLMProviderConfig | None = None):
+    def __init__(
+        self,
+        config: KnowledgeConfig,
+        llm_config: LLMProviderConfig | None = None,
+        *,
+        engine: object | None = None,
+    ):
         self.config = config
-        self._engine = None
+        self._engine = engine
         self._llm_config = llm_config
 
     @property
@@ -94,3 +103,47 @@ class KnowledgeTool(BaseTool):
             "missing_info": answer.missing_info,
             "evaluation": answer.evaluation,
         }
+
+
+class KnowledgeWriteTool(BaseTool):
+    def __init__(
+        self,
+        config: KnowledgeConfig,
+        llm_config: LLMProviderConfig | None = None,
+        *,
+        engine: object | None = None,
+    ):
+        self.writer = KnowledgeNoteWriter(config, llm_config, engine=engine)
+
+    def execute(self, params: dict) -> ToolExecutionResult:
+        try:
+            result = self.writer.write(
+                instruction=str(params.get("instruction") or ""),
+                conversation_history=list(params.get("conversation_history") or []),
+                dry_run=bool(params.get("dry_run", False)),
+                system=str(params.get("system") or "") or None,
+                env=str(params.get("env") or "") or None,
+                task_id=str(params.get("task_id") or "") or None,
+                session_id=str(params.get("session_id") or "") or None,
+            )
+        except Exception as exc:
+            return ToolExecutionResult(
+                success=False,
+                error=str(exc),
+                data={
+                    "note_path": "",
+                    "title": "",
+                    "type": "",
+                    "moc_path": "",
+                    "updated_links": [],
+                    "reindex_status": "not_started",
+                    "missing_info": [],
+                    "dry_run": bool(params.get("dry_run", False)),
+                },
+            )
+
+        return ToolExecutionResult(
+            success=result.ok,
+            error=result.error,
+            data=result.to_dict(),
+        )

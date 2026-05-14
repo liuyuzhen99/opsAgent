@@ -30,6 +30,49 @@ def test_parse_non_inspection_as_permission_or_qa():
     assert chat_result.intent == "general_chat"
 
 
+def test_parse_explicit_knowledge_write_before_llm():
+    class MisclassifyingProvider:
+        def classify_intent(self, text, defaults):
+            raise AssertionError("explicit knowledge write should bypass LLM")
+
+    parser = IntentParser(llm_provider=MisclassifyingProvider())
+
+    result = parser.parse("请把刚才的 WebLogic OOM 处理步骤记录到知识库")
+
+    assert result.intent == "knowledge_write"
+    assert result.entities["instruction"] == "请把刚才的 WebLogic OOM 处理步骤记录到知识库"
+    assert result.entities["explicit_trigger"] is True
+
+
+def test_parse_generate_knowledge_phrase_as_write():
+    parser = IntentParser()
+
+    result = parser.parse("WebLogic OOM：先 jmap，再重启 Managed Server。整理成 knowledge")
+
+    assert result.intent == "knowledge_write"
+
+
+def test_parse_add_to_knowledge_phrase_as_write():
+    parser = IntentParser()
+
+    result = parser.parse("请将以下内容添加入知识库")
+
+    assert result.intent == "knowledge_write"
+    assert result.entities["system"] is None
+
+    write_result = parser.parse("将以下内容写入知识库：")
+    assert write_result.intent == "knowledge_write"
+
+
+def test_parse_knowledge_write_infers_caishi_without_default_weblogic():
+    parser = IntentParser()
+
+    result = parser.parse("将以下内容整理到知识库：人力外围系统支付用前置机和财司的测试系统网银端对接")
+
+    assert result.intent == "knowledge_write"
+    assert result.entities["system"] == "财司系统"
+
+
 def test_parser_routes_account_role_request_to_web_action():
     parser = IntentParser()
 
@@ -100,6 +143,25 @@ def test_parse_general_chat_with_llm_when_available():
     assert result.intent == "general_chat"
     assert result.entities["raw_text"] == "hello"
     assert result.entities["llm_provider"] == "openai"
+
+
+def test_parse_knowledge_write_with_llm_does_not_default_system():
+    class FakeProvider:
+        def classify_intent(self, text, defaults):
+            return IntentClassification(
+                intent="knowledge_write",
+                entities={},
+                provider="openai",
+                model="deepseek-chat",
+                request_id=None,
+            )
+
+    parser = IntentParser(llm_provider=FakeProvider())
+
+    result = parser.parse("save this note to vault")
+
+    assert result.intent == "knowledge_write"
+    assert result.entities["system"] is None
 
 
 def test_parse_falls_back_to_rules_when_llm_fails():

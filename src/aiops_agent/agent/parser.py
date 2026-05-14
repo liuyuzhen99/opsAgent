@@ -18,6 +18,26 @@ class IntentResult:
 class IntentParser:
     INSPECTION_KEYWORDS = ("巡检", "检查", "inspect", "inspection")
     PERMISSION_KEYWORDS = ("权限", "授权", "permission", "grant")
+    KNOWLEDGE_WRITE_KEYWORDS = (
+        "记录到知识库",
+        "保存到知识库",
+        "添加入知识库",
+        "添加到知识库",
+        "加入知识库",
+        "沉淀文档",
+        "写入知识库",
+        "录入知识库",
+        "写入 vault",
+        "写入vault",
+        "整理成知识库",
+        "整理到知识库",
+        "生成知识库",
+        "生成 knowledge",
+        "生成knowledge",
+        "整理成 knowledge",
+        "整理成knowledge",
+        "知识沉淀",
+    )
     QA_KEYWORDS = (
         "怎么", "如何", "why", "what", "知识库", "sop",
         "是什么", "什么意思", "步骤", "手册", "runbook",
@@ -71,6 +91,10 @@ class IntentParser:
     def parse(self, text: str) -> IntentResult:
         normalized = text.strip()
         self.last_llm_error = None
+        explicit_write = self._parse_explicit_knowledge_write(normalized)
+        if explicit_write is not None:
+            return explicit_write
+
         llm_result = self._parse_with_llm(normalized)
         if llm_result is not None:
             return llm_result
@@ -80,6 +104,21 @@ class IntentParser:
             rule_result.entities["llm_fallback_used"] = True
             rule_result.entities["llm_fallback_error"] = self.last_llm_error
         return rule_result
+
+    def _parse_explicit_knowledge_write(self, normalized: str) -> IntentResult | None:
+        lowered = normalized.lower()
+        if not any(keyword in lowered for keyword in self.KNOWLEDGE_WRITE_KEYWORDS):
+            return None
+        return IntentResult(
+            intent="knowledge_write",
+            entities={
+                "system": self._extract_system(normalized, use_default=False),
+                "env": self._extract_env(normalized),
+                "raw_text": normalized,
+                "instruction": normalized,
+                "explicit_trigger": True,
+            },
+        )
 
     def _parse_with_llm(self, text: str) -> IntentResult | None:
         if self.llm_provider is None:
@@ -95,7 +134,10 @@ class IntentParser:
             return None
 
         entities = dict(parsed.entities)
-        entities.setdefault("system", self.default_system)
+        if parsed.intent == "knowledge_write":
+            entities.setdefault("system", None)
+        else:
+            entities.setdefault("system", self.default_system)
         entities.setdefault("env", self.default_env)
         entities["raw_text"] = text
         entities["llm_provider"] = parsed.provider
@@ -220,12 +262,14 @@ class IntentParser:
                 break
         return fields
 
-    def _extract_system(self, text: str) -> str:
-        known_systems = ("WebLogic", "Nginx", "Redis", "MySQL", "K8s", "Kafka")
+    def _extract_system(self, text: str, use_default: bool = True) -> str | None:
+        known_systems = ("WebLogic", "Nginx", "Redis", "MySQL", "K8s", "Kafka", "财司系统")
         for system in known_systems:
             if system.lower() in text.lower():
                 return system
-        return self.default_system
+        if "财司" in text:
+            return "财司系统"
+        return self.default_system if use_default else None
 
     def _extract_env(self, text: str) -> str:
         env_patterns = {

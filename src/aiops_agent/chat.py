@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+import sys
 from typing import TextIO
 
 from aiops_agent.agent.controller import AgentController
@@ -13,7 +14,7 @@ from aiops_agent.tasks.models import Task
 class ChatOptions:
     session_id: str | None = None
     llm_profile: str | None = None
-    max_steps: int = 20
+    max_steps: int = 40
     require_confirmation: bool = False
     allowed_domains: list[str] = field(default_factory=list)
     credential_ref: str | None = None
@@ -21,7 +22,7 @@ class ChatOptions:
     browser_video: bool = False
     browser_site: str | None = None
     browser_channel: str | None = None
-    browser_slow_mo_ms: int = 0
+    browser_slow_mo_ms: int = 300
 
 
 class ChatRunner:
@@ -38,12 +39,17 @@ class ChatRunner:
         self.current_session_id = options.session_id
         self.input_func = input_func
         self.output = output
+        self.last_note_source: str | None = None
+        self._prompt_session = self._build_prompt_session()
 
     def run(self) -> int:
-        self._print("进入 opsAgent chat 模式。输入 /exit 退出，/session 查看会话，/new 开启新会话。")
+        self._print(
+            "进入 opsAgent chat 模式。输入 /exit 退出，/session 查看会话，/new 开启新会话，"
+            "/save-note 保存上一条输入，/note 进入多行记录，/save-skill 保存最近成功 web_action。"
+        )
         while True:
             try:
-                user_input = self.input_func("opsAgent> ")
+                user_input = self._read_input("opsAgent> ")
             except EOFError:
                 self._print("")
                 return 0
@@ -52,6 +58,8 @@ class ChatRunner:
                 return 130
 
             text = user_input.strip()
+            original_text = text
+            save_note_command = False
             if not text:
                 continue
             if text in {"/exit", "/quit"}:
@@ -64,10 +72,29 @@ class ChatRunner:
                 self.current_session_id = None
                 self._print("已开启新会话，下一条任务会创建新的 session。")
                 continue
+            if text in {"/note", "/paste"}:
+                text = self._read_block("将多行内容粘贴到下方，单独输入 /end 结束。")
+                if not text:
+                    continue
+            if text == "/save-skill" or text.startswith("/save-skill "):
+                name = text.split(maxsplit=1)[1].strip() if " " in text else None
+                self._save_skill(name or None)
+                continue
+            if text == "/save-note" or text.startswith("/save-note "):
+                save_note_command = True
+                if " " in text:
+                    instruction = text.split(maxsplit=1)[1].strip()
+                elif self.last_note_source:
+                    instruction = f"请将以下内容整理成知识库笔记：\n\n{self.last_note_source}"
+                else:
+                    instruction = "把上一条问答记录到知识库"
+                text = f"记录到知识库：{instruction}"
 
             task = self._run_task(text)
             self.current_session_id = task.session_id or self.current_session_id
             self._print_task_result(task)
+            if not save_note_command:
+                self.last_note_source = original_text
             if task.status == "awaiting_confirmation":
                 self._handle_confirmation(task)
 
@@ -89,27 +116,29 @@ class ChatRunner:
         )
 
     def _handle_confirmation(self, task: Task) -> None:
-        self._print_confirmation(task)
-        try:
-            answer = self.input_func("确认继续执行? [y/N] ").strip().lower()
-        except EOFError:
-            self._print("")
-            return
-        except KeyboardInterrupt:
-            self._print("\n已取消确认。")
-            return
+        current = task
+        while current.status == "awaiting_confirmation":
+            self._print_confirmation(current)
+            try:
+                answer = self._read_input("确认继续执行? [y/N] ").strip().lower()
+            except EOFError:
+                self._print("")
+                return
+            except KeyboardInterrupt:
+                self._print("\n已取消确认。")
+                return
 
-        if answer not in {"y", "yes"}:
-            self._print("已跳过确认，任务保持等待确认状态。")
-            return
+            if answer not in {"y", "yes"}:
+                self._print("已跳过确认，任务保持等待确认状态。")
+                return
 
-        try:
-            resumed = self.controller.confirm(task.id, progress_callback=self._print_progress)
-        except ValueError as exc:
-            self._print(f"确认恢复失败: {exc}")
-            return
-        self.current_session_id = resumed.session_id or self.current_session_id
-        self._print_task_result(resumed)
+            try:
+                current = self.controller.confirm(current.id, progress_callback=self._print_progress)
+            except ValueError as exc:
+                self._print(f"确认恢复失败: {exc}")
+                return
+            self.current_session_id = current.session_id or self.current_session_id
+            self._print_task_result(current)
 
     def _print_confirmation(self, task: Task) -> None:
         data = (task.result or {}).get("data") or {}
@@ -144,9 +173,65 @@ class ChatRunner:
             return
         self._print(f"{session.id}\t{session.status}\t{session.last_task_id or '-'}\t{session.summary}")
 
+    def _save_skill(self, name: str | None) -> None:
+        try:
+            result = self.controller.save_web_skill(self.current_session_id, name=name)
+        except (AttributeError, ValueError) as exc:
+            self._print(f"保存 skill 失败: {exc}")
+            return
+        self._print(f"已生成 skill: {result.path}")
+        self._print(f"参数: {', '.join(result.inputs) or '-'}")
+        self._print(f"动作数: {result.action_count}")
+        self._print(f"匹配关键词: {', '.join(result.matched_keywords) or '-'}")
+
     def _print_progress(self, event: ProgressEvent) -> None:
         self._print(f"[{event.stage}] {event.message}")
 
     def _print(self, text: str) -> None:
         print(text, file=self.output)
 
+    def _read_input(self, prompt: str) -> str:
+        if self._prompt_session is not None:
+            return self._prompt_session.prompt(prompt)
+        return self.input_func(prompt)
+
+    def _read_block(self, message: str) -> str:
+        self._print(message)
+        lines: list[str] = []
+        while True:
+            line = self.input_func("... ")
+            if line.strip() == "/end":
+                break
+            lines.append(line)
+        return "\n".join(lines).strip()
+
+    def _build_prompt_session(self):
+        if self.output is not None or self.input_func is not input or not sys.stdin.isatty():
+            return None
+        try:
+            from prompt_toolkit import PromptSession
+            from prompt_toolkit.key_binding import KeyBindings
+        except ImportError:
+            return None
+
+        bindings = KeyBindings()
+
+        def insert_newline(event):
+            event.current_buffer.insert_text("\n")
+
+        def submit(event):
+            event.current_buffer.validate_and_handle()
+
+        bindings.add("enter")(submit)
+        bindings.add("escape", "enter")(insert_newline)
+        for keys in (("s-enter",), ("shift-enter",)):
+            try:
+                bindings.add(*keys)(insert_newline)
+            except (TypeError, ValueError):
+                pass
+
+        return PromptSession(
+            multiline=True,
+            key_bindings=bindings,
+            enable_history_search=True,
+        )

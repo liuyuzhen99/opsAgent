@@ -36,8 +36,9 @@ class FakeSessionStore:
 
 
 class FakeController:
-    def __init__(self, statuses=None):
+    def __init__(self, statuses=None, confirm_statuses=None):
         self.statuses = list(statuses or [])
+        self.confirm_statuses = list(confirm_statuses or [])
         self.run_calls = []
         self.confirm_calls = []
         self.session_store = FakeSessionStore()
@@ -76,7 +77,22 @@ class FakeController:
         callback = kwargs.get("progress_callback")
         if callback:
             callback(ProgressEvent(stage="tool.running", message="正在恢复执行。", task_id=task_id))
-        return _task("confirmed", task_id=task_id, session_id="session-1", status="success")
+        status = self.confirm_statuses.pop(0) if self.confirm_statuses else "success"
+        task = _task("confirmed", task_id=task_id, session_id="session-1", status=status)
+        if status == "awaiting_confirmation":
+            task.risk_level = "controlled_browser"
+            task.result = {
+                "success": False,
+                "data": {
+                    "confirmation_summary": {
+                        "current_page": "Users",
+                        "prepared_action": "click",
+                        "target": "Assign",
+                        "expected_outcome": "分配岗位",
+                    }
+                },
+            }
+        return task
 
 
 def test_chat_parser_accepts_chat_command():
@@ -101,6 +117,14 @@ def test_chat_parser_accepts_chat_command():
     assert args.session_id == "session-1"
     assert args.max_steps == 3
     assert args.headed is True
+
+
+def test_chat_parser_uses_web_agent_defaults_without_flags():
+    args = build_parser().parse_args(["chat"])
+
+    assert args.command == "chat"
+    assert args.max_steps == 40
+    assert args.browser_slow_mo_ms == 300
 
 
 def test_chat_runner_reuses_session_and_prints_progress():
@@ -139,6 +163,63 @@ def test_chat_runner_new_command_starts_new_session():
     assert controller.run_calls[1][1]["session_id"] is None
 
 
+def test_chat_runner_save_note_command_routes_to_controller():
+    controller = FakeController()
+    runner = ChatRunner(
+        controller,
+        ChatOptions(),
+        input_func=_input_script(["/save-note 记录 WebLogic OOM 步骤", "/exit"]),
+        output=StringIO(),
+    )
+
+    assert runner.run() == 0
+
+    assert controller.run_calls[0][0] == "记录到知识库：记录 WebLogic OOM 步骤"
+
+
+def test_chat_runner_save_note_without_args_uses_previous_input():
+    controller = FakeController()
+    runner = ChatRunner(
+        controller,
+        ChatOptions(),
+        input_func=_input_script(["WebLogic OOM：先 jmap，再重启 Managed Server", "/save-note", "/exit"]),
+        output=StringIO(),
+    )
+
+    assert runner.run() == 0
+
+    assert controller.run_calls[0][0] == "WebLogic OOM：先 jmap，再重启 Managed Server"
+    assert controller.run_calls[1][0] == (
+        "记录到知识库：请将以下内容整理成知识库笔记：\n\n"
+        "WebLogic OOM：先 jmap，再重启 Managed Server"
+    )
+
+
+def test_chat_runner_note_block_collects_multiline_content():
+    controller = FakeController()
+    runner = ChatRunner(
+        controller,
+        ChatOptions(),
+        input_func=_input_script([
+            "/note",
+            "将以下内容整理到知识库:# 接口",
+            "调服务url：http://10.60.143.160:8000/FrontEnd/FrontEndServlet",
+            "sp.Finance.interface.ip: 172.16.222.52",
+            "/end",
+            "/exit",
+        ]),
+        output=StringIO(),
+    )
+
+    assert runner.run() == 0
+
+    assert controller.run_calls[0][0] == (
+        "将以下内容整理到知识库:# 接口\n"
+        "调服务url：http://10.60.143.160:8000/FrontEnd/FrontEndServlet\n"
+        "sp.Finance.interface.ip: 172.16.222.52"
+    )
+
+
 def test_chat_runner_confirmation_no_does_not_resume():
     controller = FakeController(statuses=["awaiting_confirmation"])
     output = StringIO()
@@ -171,3 +252,21 @@ def test_chat_runner_confirmation_yes_resumes():
     text = output.getvalue()
     assert "需要人工确认后才能继续" in text
     assert "[tool.running]" in text
+
+
+def test_chat_runner_prompts_again_when_confirm_returns_awaiting_confirmation():
+    controller = FakeController(statuses=["awaiting_confirmation"], confirm_statuses=["awaiting_confirmation", "success"])
+    output = StringIO()
+    runner = ChatRunner(
+        controller,
+        ChatOptions(),
+        input_func=_input_script(["保存权限", "yes", "y", "/exit"]),
+        output=output,
+    )
+
+    assert runner.run() == 0
+
+    assert [call[0] for call in controller.confirm_calls] == ["task-1", "task-1"]
+    text = output.getvalue()
+    assert text.count("需要人工确认后才能继续。") == 2
+    assert "click -> Assign" in text
