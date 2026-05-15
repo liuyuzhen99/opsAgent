@@ -1,0 +1,491 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="1680" viewBox="0 0 2400 1680" role="img" aria-labelledby="title desc">
+  <title id="title">opsAgent 技术架构图</title>
+  <desc id="desc">opsAgent 项目的分层技术架构、主执行链路、工具能力域、外部系统与持久化交互。</desc>
+  <defs>
+    <style>
+      .canvas { fill: #f7f8fb; }
+      .title { font: 800 38px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #101828; }
+      .subtitle { font: 400 20px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #475467; }
+      .lane { fill: #ffffff; stroke: #d8dee9; stroke-width: 1.4; }
+      .lane-alt { fill: #fbfcfe; stroke: #d8dee9; stroke-width: 1.4; }
+      .lane-label { font: 800 24px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #263241; }
+      .lane-note { font: 500 15px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #667085; }
+      .card { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.6; }
+      .card-shadow { filter: drop-shadow(0 6px 14px rgba(16, 24, 40, 0.08)); }
+      .card-title { font: 800 21px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #111827; }
+      .card-subtitle { font: 700 16px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; fill: #475467; }
+      .body { font: 500 15.5px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #344054; }
+      .body-small { font: 500 14px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #475467; }
+      .mono { font: 700 14.5px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; fill: #344054; }
+      .chip-text { font: 800 15px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #111827; }
+      .chip-sub { font: 600 12.5px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; fill: #475467; }
+      .badge { font: 800 14px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #ffffff; }
+      .legend { font: 600 14px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #475467; }
+      .section-title { font: 800 17px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #1f2937; }
+      .arrow-blue { fill: none; stroke: #2563eb; stroke-width: 3; marker-end: url(#arrow-blue); }
+      .arrow-green { fill: none; stroke: #047857; stroke-width: 3; marker-end: url(#arrow-green); }
+      .arrow-orange { fill: none; stroke: #b45309; stroke-width: 3; marker-end: url(#arrow-orange); }
+      .arrow-gray { fill: none; stroke: #64748b; stroke-width: 2.4; marker-end: url(#arrow-gray); }
+      .arrow-red { fill: none; stroke: #be123c; stroke-width: 3; stroke-dasharray: 8 7; marker-end: url(#arrow-red); }
+      .thin { stroke-width: 2; }
+      .dashed { stroke-dasharray: 8 7; }
+    </style>
+    <marker id="arrow-blue" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="10" markerHeight="10" orient="auto-start-reverse">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#2563eb"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="10" markerHeight="10" orient="auto-start-reverse">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#047857"/>
+    </marker>
+    <marker id="arrow-orange" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="10" markerHeight="10" orient="auto-start-reverse">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#b45309"/>
+    </marker>
+    <marker id="arrow-gray" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="10" markerHeight="10" orient="auto-start-reverse">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#64748b"/>
+    </marker>
+    <marker id="arrow-red" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="10" markerHeight="10" orient="auto-start-reverse">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#be123c"/>
+    </marker>
+  </defs>
+
+  <rect class="canvas" x="0" y="0" width="2400" height="1680"/>
+
+  <text class="title" x="72" y="58">opsAgent 项目技术架构图</text>
+  <text class="subtitle" x="72" y="92">代码现状梳理：自然语言运维入口、LangGraph 编排、策略治理、工具协议、RPA / Obsidian RAG / Playwright Web Agent / Web Skill 与审计持久化</text>
+
+  <g transform="translate(1685 30)">
+    <rect x="0" y="0" width="650" height="76" rx="8" fill="#ffffff" stroke="#d8dee9"/>
+    <circle cx="28" cy="24" r="7" fill="#2563eb"/>
+    <text class="legend" x="44" y="29">主任务流 / 数据流</text>
+    <circle cx="214" cy="24" r="7" fill="#b45309"/>
+    <text class="legend" x="230" y="29">规划与治理</text>
+    <circle cx="380" cy="24" r="7" fill="#be123c"/>
+    <text class="legend" x="396" y="29">人工确认 / 恢复</text>
+    <circle cx="28" cy="54" r="7" fill="#047857"/>
+    <text class="legend" x="44" y="59">持久化 / 外部系统</text>
+    <circle cx="214" cy="54" r="7" fill="#64748b"/>
+    <text class="legend" x="230" y="59">审计、状态、上下文</text>
+  </g>
+
+  <!-- Lanes -->
+  <rect class="lane" x="55" y="125" width="2290" height="150" rx="12"/>
+  <rect class="lane-alt" x="55" y="300" width="2290" height="150" rx="12"/>
+  <rect class="lane" x="55" y="475" width="2290" height="235" rx="12"/>
+  <rect class="lane-alt" x="55" y="735" width="2290" height="185" rx="12"/>
+  <rect class="lane" x="55" y="945" width="2290" height="150" rx="12"/>
+  <rect class="lane-alt" x="55" y="1120" width="2290" height="300" rx="12"/>
+  <rect class="lane" x="55" y="1445" width="2290" height="185" rx="12"/>
+
+  <text class="lane-label" x="82" y="168">接入层</text>
+  <text class="lane-note" x="82" y="195">命令与交互</text>
+  <text class="lane-label" x="82" y="343">配置装配层</text>
+  <text class="lane-note" x="82" y="370">依赖初始化</text>
+  <text class="lane-label" x="82" y="518">编排状态机层</text>
+  <text class="lane-note" x="82" y="545">任务生命周期</text>
+  <text class="lane-label" x="82" y="778">认知与治理层</text>
+  <text class="lane-note" x="82" y="805">理解、计划、风险</text>
+  <text class="lane-label" x="82" y="988">工具协议层</text>
+  <text class="lane-note" x="82" y="1015">统一调用契约</text>
+  <text class="lane-label" x="82" y="1163">能力实现层</text>
+  <text class="lane-note" x="82" y="1190">已实现工具域</text>
+  <text class="lane-label" x="82" y="1488">支撑与外部层</text>
+  <text class="lane-note" x="82" y="1515">系统边界与落盘</text>
+
+  <!-- Access layer cards -->
+  <g class="card-shadow">
+    <rect class="card" x="315" y="148" width="230" height="102" rx="8"/>
+    <rect x="315" y="148" width="230" height="10" rx="8" fill="#2563eb"/>
+    <text class="card-title" x="335" y="181">用户 / 运维工程师</text>
+    <text class="body" x="335" y="209">自然语言任务、确认指令</text>
+    <text class="body-small" x="335" y="232">巡检、问答、网页操作、沉淀知识</text>
+  </g>
+
+  <g class="card-shadow">
+    <rect class="card" x="615" y="140" width="355" height="118" rx="8"/>
+    <rect x="615" y="140" width="355" height="10" rx="8" fill="#2563eb"/>
+    <text class="card-title" x="635" y="173">CLI 入口</text>
+    <text class="card-subtitle" x="635" y="196">src/aiops_agent/cli.py</text>
+    <text class="body" x="635" y="223">run / confirm / session</text>
+    <text class="body-small" x="635" y="246">参数：site、credential、allowed_domains、trace、video</text>
+  </g>
+
+  <g class="card-shadow">
+    <rect class="card" x="1030" y="140" width="375" height="118" rx="8"/>
+    <rect x="1030" y="140" width="375" height="10" rx="8" fill="#2563eb"/>
+    <text class="card-title" x="1050" y="173">ChatRunner 交互模式</text>
+    <text class="card-subtitle" x="1050" y="196">src/aiops_agent/chat.py</text>
+    <text class="body" x="1050" y="223">/new /session /save-note /note /save-skill</text>
+    <text class="body-small" x="1050" y="246">自动处理 awaiting_confirmation 的 y/N 恢复</text>
+  </g>
+
+  <g class="card-shadow">
+    <rect class="card" x="1465" y="140" width="415" height="118" rx="8"/>
+    <rect x="1465" y="140" width="415" height="10" rx="8" fill="#2563eb"/>
+    <text class="card-title" x="1485" y="173">Knowledge 子命令</text>
+    <text class="card-subtitle" x="1485" y="196">knowledge index / query / write</text>
+    <text class="body" x="1485" y="223">直接管理 Obsidian vault 索引与写入</text>
+    <text class="body-small" x="1485" y="246">旁路 Agent，但复用 KnowledgeEngine / Writer</text>
+  </g>
+
+  <!-- Config cards -->
+  <g class="card-shadow">
+    <rect class="card" x="315" y="324" width="255" height="100" rx="8"/>
+    <rect x="315" y="324" width="255" height="10" rx="8" fill="#0f766e"/>
+    <text class="card-title" x="335" y="357">create_controller()</text>
+    <text class="body" x="335" y="386">装配 Parser、ToolRegistry、Store</text>
+    <text class="body-small" x="335" y="409">返回 AgentController 实例</text>
+  </g>
+
+  <g class="card-shadow">
+    <rect class="card" x="620" y="316" width="420" height="116" rx="8"/>
+    <rect x="620" y="316" width="420" height="10" rx="8" fill="#0f766e"/>
+    <text class="card-title" x="640" y="349">配置加载与启动校验</text>
+    <text class="card-subtitle" x="640" y="372">config.py / site_config.py / credentials.py</text>
+    <text class="body-small" x="640" y="398">RPA/ShadowBot、LLM provider、browser_sites、凭据引用</text>
+    <text class="body-small" x="640" y="421">校验 flow_map、token、模型、站点 URL、工作流字段</text>
+  </g>
+
+  <g class="card-shadow">
+    <rect class="card" x="1090" y="316" width="405" height="116" rx="8"/>
+    <rect x="1090" y="316" width="405" height="10" rx="8" fill="#0f766e"/>
+    <text class="card-title" x="1110" y="349">工具注册中心初始化</text>
+    <text class="card-subtitle" x="1110" y="372">ToolRegistry.register()</text>
+    <text class="body-small" x="1110" y="398">inspection、knowledge、knowledge_writer、chat</text>
+    <text class="body-small" x="1110" y="421">browser_agent + risk_level / tags / timeout</text>
+  </g>
+
+  <g class="card-shadow">
+    <rect class="card" x="1545" y="316" width="430" height="116" rx="8"/>
+    <rect x="1545" y="316" width="430" height="10" rx="8" fill="#0f766e"/>
+    <text class="card-title" x="1565" y="349">运行时安全边界</text>
+    <text class="body-small" x="1565" y="378">allowed_domains、credential_ref、require_confirmation</text>
+    <text class="body-small" x="1565" y="402">headless/headed、browser_channel、slow_mo</text>
+    <text class="body-small" x="1565" y="426">trace/video/artifacts 仅按任务落盘</text>
+  </g>
+
+  <!-- Orchestration layer -->
+  <g class="card-shadow">
+    <rect class="card" x="315" y="505" width="360" height="160" rx="8"/>
+    <rect x="315" y="505" width="360" height="10" rx="8" fill="#7c3aed"/>
+    <text class="card-title" x="335" y="539">AgentController</text>
+    <text class="card-subtitle" x="335" y="562">agent/controller.py</text>
+    <text class="body-small" x="335" y="588">run(): create/resume session，create task</text>
+    <text class="body-small" x="335" y="611">写入 session.created / task_created 审计</text>
+    <text class="body-small" x="335" y="634">graph.invoke() 驱动主流程</text>
+    <text class="body-small" x="335" y="657">confirm(): 注入 pending_action 并恢复执行</text>
+  </g>
+
+  <g class="card-shadow">
+    <rect class="card" x="735" y="500" width="1210" height="175" rx="8"/>
+    <rect x="735" y="500" width="1210" height="10" rx="8" fill="#7c3aed"/>
+    <text class="card-title" x="755" y="534">LangGraph 显式状态机</text>
+    <text class="card-subtitle" x="755" y="557">StateGraph(OrchestrationState)</text>
+
+    <g>
+      <rect x="765" y="584" width="155" height="58" rx="8" fill="#eef4ff" stroke="#93c5fd"/>
+      <text class="chip-text" x="783" y="607">1 意图识别</text>
+      <text class="chip-sub" x="783" y="627">intent_parse</text>
+      <rect x="956" y="584" width="155" height="58" rx="8" fill="#f0fdfa" stroke="#5eead4"/>
+      <text class="chip-text" x="974" y="607">2 任务计划</text>
+      <text class="chip-sub" x="974" y="627">task_plan</text>
+      <rect x="1147" y="584" width="160" height="58" rx="8" fill="#fff7ed" stroke="#fdba74"/>
+      <text class="chip-text" x="1165" y="607">3 策略检查</text>
+      <text class="chip-sub" x="1165" y="627">policy_check</text>
+      <rect x="1348" y="584" width="160" height="58" rx="8" fill="#ecfdf3" stroke="#86efac"/>
+      <text class="chip-text" x="1366" y="607">4 工具执行</text>
+      <text class="chip-sub" x="1366" y="627">tool_execute</text>
+      <rect x="1549" y="584" width="155" height="58" rx="8" fill="#fdf2f8" stroke="#f9a8d4"/>
+      <text class="chip-text" x="1567" y="607">5 结果摘要</text>
+      <text class="chip-sub" x="1567" y="627">summarize</text>
+      <rect x="1740" y="584" width="165" height="58" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
+      <text class="chip-text" x="1758" y="607">6 审计持久化</text>
+      <text class="chip-sub" x="1758" y="627">persist_audit</text>
+    </g>
+    <text class="body-small" x="755" y="663">策略分支：approved 进入 tool_execute；awaiting_confirmation / blocked 直接摘要并落盘</text>
+  </g>
+
+  <g class="card-shadow">
+    <rect class="card" x="1995" y="515" width="295" height="140" rx="8"/>
+    <rect x="1995" y="515" width="295" height="10" rx="8" fill="#be123c"/>
+    <text class="card-title" x="2015" y="549">确认恢复路径</text>
+    <text class="body-small" x="2015" y="578">仅恢复 awaiting_confirmation 任务</text>
+    <text class="body-small" x="2015" y="602">pending_action_raw + replay_actions</text>
+    <text class="body-small" x="2015" y="626">复用 browser-state 和已完成 action keys</text>
+  </g>
+
+  <!-- Cognitive and governance cards -->
+  <g class="card-shadow">
+    <rect class="card" x="315" y="760" width="350" height="130" rx="8"/>
+    <rect x="315" y="760" width="350" height="10" rx="8" fill="#b45309"/>
+    <text class="card-title" x="335" y="793">IntentParser</text>
+    <text class="card-subtitle" x="335" y="816">agent/parser.py</text>
+    <text class="body-small" x="335" y="842">LLM classify_intent 优先，失败规则 fallback</text>
+    <text class="body-small" x="335" y="866">inspection / web_action / ops_qa / knowledge_write</text>
+  </g>
+
+  <g class="card-shadow">
+    <rect class="card" x="710" y="760" width="350" height="130" rx="8"/>
+    <rect x="710" y="760" width="350" height="10" rx="8" fill="#b45309"/>
+    <text class="card-title" x="730" y="793">PlanningService</text>
+    <text class="card-subtitle" x="730" y="816">planning.py</text>
+    <text class="body-small" x="730" y="842">生成 ExecutionPlan / ToolCallSpec</text>
+    <text class="body-small" x="730" y="866">web_action 可命中 WebSkill，否则 auto_plan</text>
+  </g>
+
+  <g class="card-shadow">
+    <rect class="card" x="1105" y="760" width="335" height="130" rx="8"/>
+    <rect x="1105" y="760" width="335" height="10" rx="8" fill="#b45309"/>
+    <text class="card-title" x="1125" y="793">PolicyEngine</text>
+    <text class="card-subtitle" x="1125" y="816">policy.py</text>
+    <text class="body-small" x="1125" y="842">permission_change 标记 high_risk_change</text>
+    <text class="body-small" x="1125" y="866">显式确认任务进入 awaiting_confirmation</text>
+  </g>
+
+  <g class="card-shadow">
+    <rect class="card" x="1485" y="760" width="360" height="130" rx="8"/>
+    <rect x="1485" y="760" width="360" height="10" rx="8" fill="#b45309"/>
+    <text class="card-title" x="1505" y="793">摘要与上下文压缩</text>
+    <text class="card-subtitle" x="1505" y="816">summarizer.py / context.py</text>
+    <text class="body-small" x="1505" y="842">按意图输出报告、来源、置信度、建议</text>
+    <text class="body-small" x="1505" y="866">滚动保存 last_url、qa_turns、browser state</text>
+  </g>
+
+  <g class="card-shadow">
+    <rect class="card" x="1890" y="760" width="360" height="130" rx="8"/>
+    <rect x="1890" y="760" width="360" height="10" rx="8" fill="#b45309"/>
+    <text class="card-title" x="1910" y="793">LLM 抽象层</text>
+    <text class="card-subtitle" x="1910" y="816">llm/base.py / langchain_provider.py</text>
+    <text class="body-small" x="1910" y="842">Anthropic / OpenAI 兼容 provider</text>
+    <text class="body-small" x="1910" y="866">角色模型：intent、chat、browser、knowledge</text>
+  </g>
+
+  <!-- Tool contract layer -->
+  <g class="card-shadow">
+    <rect class="card" x="315" y="970" width="355" height="96" rx="8"/>
+    <rect x="315" y="970" width="355" height="10" rx="8" fill="#334155"/>
+    <text class="card-title" x="335" y="1003">任务与调用模型</text>
+    <text class="body-small" x="335" y="1030">Task / ExecutionPlan / ToolCallSpec</text>
+    <text class="body-small" x="335" y="1053">risk_level、confirmation_required、artifacts</text>
+  </g>
+
+  <g class="card-shadow">
+    <rect class="card" x="725" y="970" width="355" height="96" rx="8"/>
+    <rect x="725" y="970" width="355" height="10" rx="8" fill="#334155"/>
+    <text class="card-title" x="745" y="1003">ToolExecutor / Registry</text>
+    <text class="card-subtitle" x="745" y="1026">tools/executor.py / registry.py</text>
+    <text class="body-small" x="745" y="1053">按 tool_name 查找并调用 BaseTool.execute()</text>
+  </g>
+
+  <g class="card-shadow">
+    <rect class="card" x="1135" y="970" width="355" height="96" rx="8"/>
+    <rect x="1135" y="970" width="355" height="10" rx="8" fill="#334155"/>
+    <text class="card-title" x="1155" y="1003">统一结果协议</text>
+    <text class="body-small" x="1155" y="1030">ToolExecutionResult(success,data,error)</text>
+    <text class="body-small" x="1155" y="1053">retryable + TaskArtifact 列表</text>
+  </g>
+
+  <g class="card-shadow">
+    <rect class="card" x="1545" y="970" width="355" height="96" rx="8"/>
+    <rect x="1545" y="970" width="355" height="10" rx="8" fill="#334155"/>
+    <text class="card-title" x="1565" y="1003">进度与审计钩子</text>
+    <text class="body-small" x="1565" y="1030">ProgressEvent 实时输出</text>
+    <text class="body-small" x="1565" y="1053">AuditEvent 覆盖 plan / policy / tool / page</text>
+  </g>
+
+  <g class="card-shadow">
+    <rect class="card" x="1955" y="970" width="295" height="96" rx="8"/>
+    <rect x="1955" y="970" width="295" height="10" rx="8" fill="#334155"/>
+    <text class="card-title" x="1975" y="1003">错误收敛</text>
+    <text class="body-small" x="1975" y="1030">success / failed / blocked</text>
+    <text class="body-small" x="1975" y="1053">awaiting_confirmation 可恢复</text>
+  </g>
+
+  <!-- Capability cards -->
+  <g class="card-shadow">
+    <rect class="card" x="300" y="1148" width="350" height="230" rx="8"/>
+    <rect x="300" y="1148" width="350" height="10" rx="8" fill="#2563eb"/>
+    <text class="card-title" x="320" y="1182">RPA 巡检能力</text>
+    <text class="card-subtitle" x="320" y="1205">tools/inspection.py</text>
+    <text class="body-small" x="320" y="1232">输入：system / env / raw_text</text>
+    <text class="body-small" x="320" y="1256">flow_map 找到流程 ID</text>
+    <text class="body-small" x="320" y="1280">api 模式：POST RPA 平台</text>
+    <text class="body-small" x="320" y="1304">shadowbot_local：Windows 启动影刀</text>
+    <text class="body-small" x="320" y="1328">输出：inspection_result、anomalies、operation_log</text>
+    <text class="body-small" x="320" y="1352">结果标准化后交给 Summarizer</text>
+  </g>
+
+  <g class="card-shadow">
+    <rect class="card" x="690" y="1138" width="485" height="250" rx="8"/>
+    <rect x="690" y="1138" width="485" height="10" rx="8" fill="#047857"/>
+    <text class="card-title" x="710" y="1172">Obsidian 知识库 RAG / 写入</text>
+    <text class="card-subtitle" x="710" y="1195">knowledge/* + tools/knowledge.py</text>
+    <text class="body-small" x="710" y="1222">VaultIndexer：Markdown、frontmatter、wikilink、MOC</text>
+    <text class="body-small" x="710" y="1246">检索：BM25 / Chroma 向量 / Hybrid RRF 融合</text>
+    <text class="body-small" x="710" y="1270">Retriever：多轮 query rewrite + LLM synthesis</text>
+    <text class="body-small" x="710" y="1294">Evaluator：faithfulness / relevance 置信度</text>
+    <text class="body-small" x="710" y="1318">Writer：LLM JSON 草稿 -> Markdown note</text>
+    <text class="body-small" x="710" y="1342">防越界写入、更新 MOC、写后 reindex</text>
+    <text class="body-small" x="710" y="1366">会话保存最近 5 轮 qa_turns 供追问使用</text>
+  </g>
+
+  <g class="card-shadow">
+    <rect class="card" x="1215" y="1130" width="615" height="268" rx="8"/>
+    <rect x="1215" y="1130" width="615" height="10" rx="8" fill="#be123c"/>
+    <text class="card-title" x="1235" y="1164">受控 Playwright Web Agent</text>
+    <text class="card-subtitle" x="1235" y="1187">browser/agent.py + planner.py + playwright_tool.py</text>
+    <text class="body-small" x="1235" y="1214">Planner：workflow / rule / LLM ReAct</text>
+    <text class="body-small" x="1235" y="1238">Tool：open / click / type / select</text>
+    <text class="body-small" x="1235" y="1262">Observe：DOM / forms / messages</text>
+    <text class="body-small" x="1235" y="1286">Risk：read / local edit / mutation</text>
+    <text class="body-small" x="1235" y="1310">Confirm：mutation -> awaiting_confirmation</text>
+    <text class="body-small" x="1235" y="1334">Resume：state + replay + pending</text>
+    <text class="body-small" x="1235" y="1358">Stabilize：fields / popups / first row</text>
+
+    <rect x="1532" y="1214" width="270" height="150" rx="8" fill="#fff1f2" stroke="#fda4af"/>
+    <text class="section-title" x="1550" y="1240">Reflection 闭环</text>
+    <text class="body-small" x="1550" y="1265">action.executed</text>
+    <text class="body-small" x="1550" y="1288">page.observed</text>
+    <text class="body-small" x="1550" y="1311">action.reflected</text>
+    <text class="body-small" x="1550" y="1334">failure_category / terminal_reason</text>
+    <text class="body-small" x="1550" y="1357">next_decision: continue | stop</text>
+    <path class="arrow-red thin" d="M1698 1262 C1738 1262 1738 1320 1700 1320"/>
+  </g>
+
+  <g class="card-shadow">
+    <rect class="card" x="1870" y="1148" width="410" height="230" rx="8"/>
+    <rect x="1870" y="1148" width="410" height="10" rx="8" fill="#9333ea"/>
+    <text class="card-title" x="1890" y="1182">复用与对话能力</text>
+    <text class="card-subtitle" x="1890" y="1205">browser/skills/* + tools/chat.py</text>
+    <text class="body-small" x="1890" y="1232">WebSkillStore：SKILL.md + assets/workflow.json</text>
+    <text class="body-small" x="1890" y="1256">Matcher：site_key、关键词、字段、输入完整度评分</text>
+    <text class="body-small" x="1890" y="1280">Renderer：把 {{username}} 等参数渲染成动作</text>
+    <text class="body-small" x="1890" y="1304">Generator：从成功 web_action 沉淀固定 workflow</text>
+    <text class="body-small" x="1890" y="1328">失败回退：非业务失败可回退 LLM planner 一次</text>
+    <text class="body-small" x="1890" y="1352">ChatTool：普通对话 + 当前时间上下文</text>
+  </g>
+
+  <!-- Support and external layer -->
+  <g class="card-shadow">
+    <rect class="card" x="300" y="1472" width="300" height="126" rx="8"/>
+    <rect x="300" y="1472" width="300" height="10" rx="8" fill="#2563eb"/>
+    <text class="card-title" x="320" y="1506">RPA / 影刀</text>
+    <text class="body-small" x="320" y="1534">YiDao API：/api/v1/flows/{id}/run</text>
+    <text class="body-small" x="320" y="1558">ShadowBot local：Windows 命令启动</text>
+    <text class="body-small" x="320" y="1582">可读取 result_file 标准化结果</text>
+  </g>
+
+  <g class="card-shadow">
+    <rect class="card" x="640" y="1472" width="350" height="126" rx="8"/>
+    <rect x="640" y="1472" width="350" height="10" rx="8" fill="#047857"/>
+    <text class="card-title" x="660" y="1506">Obsidian Vault</text>
+    <text class="body-small" x="660" y="1534">Markdown note / MOC / wikilink 图上下文</text>
+    <text class="body-small" x="660" y="1558">vault/.chroma 向量索引</text>
+    <text class="body-small" x="660" y="1582">include / exclude patterns 控制索引边界</text>
+  </g>
+
+  <g class="card-shadow">
+    <rect class="card" x="1030" y="1472" width="320" height="126" rx="8"/>
+    <rect x="1030" y="1472" width="320" height="10" rx="8" fill="#be123c"/>
+    <text class="card-title" x="1050" y="1506">目标 Web 系统</text>
+    <text class="body-small" x="1050" y="1534">browser_sites：base_url / login_url</text>
+    <text class="body-small" x="1050" y="1558">login_fields、workflow navigation</text>
+    <text class="body-small" x="1050" y="1582">allowed_domains 防止越界访问</text>
+  </g>
+
+  <g class="card-shadow">
+    <rect class="card" x="1390" y="1472" width="300" height="126" rx="8"/>
+    <rect x="1390" y="1472" width="300" height="10" rx="8" fill="#b45309"/>
+    <text class="card-title" x="1410" y="1506">外部 LLM Provider</text>
+    <text class="body-small" x="1410" y="1534">OpenAI 兼容 / Anthropic</text>
+    <text class="body-small" x="1410" y="1558">意图、浏览器规划、RAG 合成</text>
+    <text class="body-small" x="1410" y="1582">按 role_models 选择模型</text>
+  </g>
+
+  <g class="card-shadow">
+    <rect class="card" x="1730" y="1462" width="565" height="146" rx="8"/>
+    <rect x="1730" y="1462" width="565" height="10" rx="8" fill="#334155"/>
+    <text class="card-title" x="1750" y="1496">本地持久化与可观测性</text>
+    <text class="body-small" x="1750" y="1524">storage/tasks/*.json：Task 状态、计划、结果、artifacts</text>
+    <text class="body-small" x="1750" y="1548">storage/sessions/*.json：rolling_summary、qa_turns、browser_last_success_task_id</text>
+    <text class="body-small" x="1750" y="1572">storage/audit/events.jsonl：脱敏 AuditEvent，覆盖会话、策略、工具和页面动作</text>
+    <text class="body-small" x="1750" y="1596">storage/artifacts：screenshot、page-summary、execution-report、browser-state、trace/video</text>
+  </g>
+
+  <!-- Clean interaction map: short arrows and numbered handoffs -->
+  <g>
+    <circle cx="595" cy="199" r="16" fill="#2563eb"/>
+    <text class="badge" x="591" y="204">1</text>
+    <path class="arrow-blue thin" d="M545 199 L615 199"/>
+    <path class="arrow-blue thin" d="M970 199 L1030 199"/>
+    <path class="arrow-blue thin" d="M1405 199 L1465 199"/>
+    <text class="body-small" x="620" y="275">CLI 按子命令分流：run / chat / knowledge / confirm / session</text>
+  </g>
+
+  <g>
+    <circle cx="792" cy="287" r="16" fill="#047857"/>
+    <text class="badge" x="788" y="292">2</text>
+    <path class="arrow-green thin" d="M792 258 L792 316"/>
+    <path class="arrow-green thin" d="M570 374 L620 374"/>
+    <path class="arrow-green thin" d="M1040 374 L1090 374"/>
+    <path class="arrow-green thin" d="M1495 374 L1545 374"/>
+    <text class="body-small" x="1092" y="456">create_controller() 装配配置、工具、Store、LLM provider 与浏览器安全边界</text>
+  </g>
+
+  <g>
+    <circle cx="496" cy="465" r="16" fill="#7c3aed"/>
+    <text class="badge" x="492" y="470">3</text>
+    <path class="arrow-gray thin" d="M496 424 L496 505"/>
+    <path class="arrow-blue thin" d="M675 585 L735 585"/>
+    <text class="body-small" x="735" y="704">主状态机只保留横向执行流；分支通过 Task.status 与右侧说明表达</text>
+  </g>
+
+  <g>
+    <path class="arrow-blue thin" d="M920 613 L956 613"/>
+    <path class="arrow-blue thin" d="M1111 613 L1147 613"/>
+    <path class="arrow-orange thin" d="M1307 613 L1348 613"/>
+    <path class="arrow-blue thin" d="M1508 613 L1549 613"/>
+    <path class="arrow-gray thin" d="M1704 613 L1740 613"/>
+  </g>
+
+  <g>
+    <circle cx="1918" cy="685" r="16" fill="#be123c"/>
+    <text class="badge" x="1914" y="690">4</text>
+    <path class="arrow-red thin" d="M1508 643 L1508 690 L1995 690 L1995 655"/>
+    <text class="body-small" x="1518" y="704">危险远端写入只生成确认摘要，confirm 后恢复 pending_action</text>
+  </g>
+
+  <g>
+    <circle cx="1312" cy="925" r="16" fill="#334155"/>
+    <text class="badge" x="1308" y="930">5</text>
+    <path class="arrow-blue thin" d="M1312 675 L1312 970"/>
+    <path class="arrow-blue thin" d="M1080 1018 L1135 1018"/>
+    <path class="arrow-blue thin" d="M1490 1018 L1545 1018"/>
+    <text class="body-small" x="1390" y="940">tool_execute 进入统一工具协议：Registry 查找、Executor 调用、Result 回写 Task</text>
+  </g>
+
+  <g>
+    <circle cx="1312" cy="1105" r="16" fill="#2563eb"/>
+    <text class="badge" x="1308" y="1110">6</text>
+    <path class="arrow-blue thin" d="M1312 1066 L1312 1112"/>
+    <path class="arrow-blue thin" d="M1312 1112 L475 1112 L475 1148"/>
+    <path class="arrow-green thin" d="M1312 1112 L933 1112 L933 1138"/>
+    <path class="arrow-red thin" d="M1312 1112 L1523 1112 L1523 1130"/>
+    <path class="arrow-gray thin" d="M1312 1112 L2075 1112 L2075 1148"/>
+    <text class="body-small" x="1332" y="1103">工具按 selected_tools 进入对应能力域：巡检、知识库、浏览器、对话/技能复用</text>
+  </g>
+
+  <g>
+    <circle cx="1312" cy="1434" r="16" fill="#047857"/>
+    <text class="badge" x="1308" y="1439">7</text>
+    <path class="arrow-green thin" d="M475 1378 L475 1430 L450 1430 L450 1472"/>
+    <path class="arrow-green thin" d="M933 1388 L933 1430 L815 1430 L815 1472"/>
+    <path class="arrow-red thin" d="M1523 1398 L1523 1430 L1190 1430 L1190 1472"/>
+    <path class="arrow-orange thin" d="M1523 1398 L1523 1430 L1540 1430 L1540 1472"/>
+    <path class="arrow-gray thin" d="M2075 1378 L2075 1430 L2012 1430 L2012 1462"/>
+    <text class="body-small" x="1332" y="1440">能力域只向各自外部系统和本地存储落盘，减少交叉依赖</text>
+  </g>
+
+  <g>
+    <rect x="315" y="1618" width="1980" height="1.5" fill="#d8dee9"/>
+    <text class="body-small" x="315" y="1650">代码索引：cli.py、agent/controller.py、agent/parser.py、planning.py、policy.py、tools/*、browser/*、knowledge/*、storage/*、audit/*、sessions/models.py、tasks/models.py</text>
+  </g>
+</svg>
