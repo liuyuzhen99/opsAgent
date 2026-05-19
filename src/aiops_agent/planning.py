@@ -12,10 +12,24 @@ class PlanningService:
         self.web_skill_matcher = web_skill_matcher
 
     def plan(self, task_input: str, intent: str, entities: dict[str, object]) -> ExecutionPlan:
+        session_memory = entities.get("session_memory") if isinstance(entities.get("session_memory"), dict) else {}
         if intent == "inspection":
+            task_matches = session_memory.get("task_matches") if isinstance(session_memory, dict) else []
+            matched_system = ""
+            matched_env = ""
+            if isinstance(task_matches, list):
+                for match in task_matches:
+                    if not isinstance(match, dict):
+                        continue
+                    if match.get("intent") and match.get("intent") != "inspection":
+                        continue
+                    matched_system = str(match.get("system") or "")
+                    matched_env = str(match.get("env") or "")
+                    if matched_system or matched_env:
+                        break
             params = {
-                "system": entities.get("system"),
-                "env": entities.get("env"),
+                "system": entities.get("system") or matched_system or None,
+                "env": entities.get("env") or matched_env or None,
                 "raw_text": entities.get("raw_text", task_input),
             }
             return ExecutionPlan(
@@ -110,6 +124,7 @@ class PlanningService:
             )
 
         if intent == "general_chat":
+            session_memory = entities.get("session_memory") if isinstance(entities.get("session_memory"), dict) else {}
             return ExecutionPlan(
                 goal="在 chat 模式下回复普通对话",
                 steps=[
@@ -122,7 +137,7 @@ class PlanningService:
                     ToolCallSpec(
                         tool_name="chat",
                         action="reply",
-                        params={"message": entities.get("raw_text", task_input)},
+                        params={"message": entities.get("raw_text", task_input), "session_memory": session_memory},
                         risk_level="read_only",
                     )
                 ],
@@ -132,7 +147,10 @@ class PlanningService:
             )
 
         if intent == "web_action":
-            start_url = entities.get("start_url")
+            browser_memory = session_memory.get("browser_memory") if isinstance(session_memory, dict) else {}
+            if not isinstance(browser_memory, dict):
+                browser_memory = {}
+            start_url = entities.get("start_url") or browser_memory.get("last_url")
             raw_text = str(entities.get("raw_text", task_input))
             allowed_domains = list(entities.get("allowed_domains") or [])
             if start_url and not allowed_domains:
@@ -153,7 +171,8 @@ class PlanningService:
                 "requires_login": bool(entities.get("requires_login")),
                 "requires_remote_mutation": has_side_effect,
                 "auto_plan": True,
-                "site_key": entities.get("site_key"),
+                "session_state_path": browser_memory.get("state_path") or None,
+                "site_key": entities.get("site_key") or browser_memory.get("last_success_site_key"),
                 "workflow": None,
                 "workflow_fields": workflow_fields,
                 "site_config": entities.get("site_config") or {},

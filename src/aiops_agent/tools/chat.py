@@ -16,6 +16,10 @@ class ChatTool(BaseTool):
     def execute(self, params: dict) -> ToolExecutionResult:
         message = str(params.get("message") or "")
         context = self._runtime_context()
+        llm_context = dict(context)
+        session_memory = params.get("session_memory")
+        if isinstance(session_memory, dict):
+            llm_context["session_memory"] = session_memory
         if self.llm_provider is None or not self.llm_provider.enabled:
             return ToolExecutionResult(
                 success=True,
@@ -27,7 +31,7 @@ class ChatTool(BaseTool):
                 },
             )
         try:
-            reply = self.llm_provider.generate_chat_reply(message, context=context)
+            reply = self.llm_provider.generate_chat_reply(message, context=llm_context)
         except LLMError as exc:
             return ToolExecutionResult(
                 success=False,
