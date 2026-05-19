@@ -440,3 +440,89 @@ summarizer=ResultSummarizer()
 6. 修改 `cli.py`，注入 `ContextCompressor(llm_provider=provider)`。
 7. 增加 migration、compressor、retrieval、LLM fallback 测试。
 8. 跑回归测试并修复兼容问题。
+
+## Implementation Record - 2026-05-19
+
+### Completed Changes
+
+- `src/aiops_agent/sessions/models.py`
+  - 新增 `ShortTermTurn`、`PageMemory`、`BrowserMemory`、`QATurn`、`SessionTaskIndexEntry`。
+  - `AgentSession` 新增 `short_term`、`browser_memory`、`qa_memory`、`task_index`。
+  - 保留 `summary`、`rolling_summary`、`recent_observations`、`metadata` 兼容字段。
+
+- `src/aiops_agent/storage/session_store.py`
+  - 将 `load()` 改为显式 from-dict/migration 流程。
+  - 支持新结构嵌套 dict 反序列化为 dataclass。
+  - 支持从旧 `metadata["qa_turns"]`、`recent_observations`、browser legacy metadata 初始化新 memory。
+  - 对非法 `qa_turns` JSON、缺字段 observation、错误类型新字段做容错回退。
+  - `save()` 继续使用 `json.dump(asdict(session), ...)`。
+
+- `src/aiops_agent/agent/context.py`
+  - 保留 `ContextCompressor.compress(session, task)` 调用点。
+  - 新增 `llm_provider` 软依赖注入。
+  - 拆分并实现：
+    - `extract_memory_facts()`
+    - `apply_memory_facts()`
+    - `render_rolling_summary()`
+    - `summarize_session()`
+    - `retrieve()`
+  - 结构化 memory 全部由规则生成：
+    - `short_term` 最近 10 条。
+    - `task_index` 最近 50 条。
+    - `qa_memory` 仅记录成功 `ops_qa`，最近 5 条。
+    - `browser_memory` 记录最近页面、state path、最近成功 web task/site。
+  - 同步维护 legacy fallback：
+    - `metadata["qa_turns"]`
+    - `recent_observations`
+    - `metadata["last_url"]`
+    - `metadata["last_page_type"]`
+    - `metadata["browser_state_path"]`
+    - `metadata["browser_last_success_task_id"]`
+    - `metadata["browser_last_success_site_key"]`
+  - `rolling_summary` 始终规则生成。
+  - `summary` 优先调用 LLM 的 `summarize_session_memory()`，接口缺失、disabled、空值、异常时回退规则摘要。
+  - LLM facts 做截断、敏感字段过滤和敏感文本脱敏，不传完整 task JSON，不传 browser state 本地路径。
+  - `retrieve()` 只读取当前 `AgentSession` 内 memory，返回 memory 快照和 `task_matches` 的 `task_id`。
+
+- `src/aiops_agent/llm/base.py`
+  - `BaseLLMProvider` 新增 `summarize_session_memory(memory_facts)` 接口。
+
+- `src/aiops_agent/llm/langchain_provider.py`
+  - 实现 `summarize_session_memory()`。
+  - LLM disabled 时抛 `LLMError`。
+  - Prompt 只接收规则抽取后的 memory facts，返回纯文本摘要。
+  - 空响应抛 `LLMError`，由 `ContextCompressor` fallback。
+
+- `src/aiops_agent/agent/controller.py`
+  - `_task_plan_node()` 优先读取 `session.qa_memory[-5:]`，为空时 fallback 到旧 `metadata["qa_turns"]`。
+  - `_persist_audit_node()` 删除直接维护 `metadata["qa_turns"]` 的逻辑，只调用 `ContextCompressor.compress()`。
+  - `save_web_skill()` 优先读取 `session.browser_memory.last_success_task_id`，再 fallback 到旧 metadata，并兼容 `SimpleNamespace` mock。
+
+- `src/aiops_agent/cli.py`
+  - `create_controller()` 注入 `ContextCompressor(llm_provider=provider)`。
+  - 未改动 `ResultSummarizer()`。
+
+- `tests/test_session_memory.py`
+  - 新增专门测试覆盖 migration、compressor、retrieval、LLM fallback、controller regression。
+
+### Verification
+
+- 已运行全量测试：
+
+```bash
+.venv/bin/python -B -m pytest
+```
+
+- 结果：
+
+```text
+152 passed, 6 skipped, 2 warnings
+```
+
+### Notes
+
+- 本次未实现跨 session memory、全局 task index、SQLite 或向量检索。
+- `ResultSummarizer` 未改。
+- 完整 task JSON 仍由 `storage/tasks/<task_id>.json` 保存。
+- `retrieve()` 不扫描 session 文件，也不读取完整 task JSON；需要完整详情时由调用方根据返回的 `task_id` 使用 `TaskManager.load()`。
+- 工作区中原本已有 `storage/audit/events.jsonl` 修改，本次改造未依赖该文件。
