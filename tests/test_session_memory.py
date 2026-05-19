@@ -288,6 +288,45 @@ def test_task_plan_prefers_qa_memory_and_falls_back_to_legacy_metadata():
     assert legacy_planning.entities["conversation_history"] == [{"question": "old Q", "answer": "old A"}]
 
 
+def test_task_plan_attaches_retrieved_session_memory_to_entities():
+    class _FakeCompressor:
+        def __init__(self):
+            self.calls = []
+
+        def retrieve(self, session, intent, query, limit=5):
+            self.calls.append((session.id, intent, query, limit))
+            return {
+                "summary": "session summary",
+                "rolling_summary": "rolling",
+                "qa_memory": [{"question": "retrieved Q", "answer": "retrieved A"}],
+                "short_term": [{"task_id": "recent"}],
+                "browser_memory": {"last_url": "http://example.test"},
+                "task_matches": [{"task_id": "match-1"}],
+            }
+
+    planning = _FakePlanningService()
+    compressor = _FakeCompressor()
+    controller = AgentController(
+        parser=None,
+        task_manager=None,
+        tool_executor=None,
+        summarizer=None,
+        audit_logger=_FakeAuditLogger(),
+        session_store=None,
+        planning_service=planning,
+        context_compressor=compressor,
+    )
+    task = _task("qa-plan-retrieve", "ops_qa", text="继续解释一下")
+    session = SimpleNamespace(id="session", metadata={})
+
+    controller._task_plan_node({"task": task, "session": session, "progress_callback": None})
+
+    assert compressor.calls == [("session", "ops_qa", "继续解释一下", 5)]
+    assert planning.entities["session_memory"]["summary"] == "session summary"
+    assert planning.entities["session_memory"]["task_matches"][0]["task_id"] == "match-1"
+    assert planning.entities["conversation_history"] == [{"question": "retrieved Q", "answer": "retrieved A"}]
+
+
 def test_persist_audit_delegates_qa_memory_write_to_compressor():
     class _FakeTaskManager:
         def __init__(self):

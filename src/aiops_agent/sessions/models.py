@@ -8,9 +8,9 @@ from uuid import uuid4
 @dataclass(slots=True)
 class ShortTermTurn:
     task_id: str
-    intent: str
+    intent: str # 任务类型
     status: str
-    input: str
+    input: str # 任务的具体内容
     report: str
     created_at: str
 
@@ -27,7 +27,7 @@ class PageMemory:
 @dataclass(slots=True)
 class BrowserMemory:
     recent_pages: list[PageMemory] = field(default_factory=list)
-    state_path: str = ""
+    state_path: str = "" # Path to the most recent browser state snapshot
     last_url: str = ""
     last_page_type: str = ""
     last_success_task_id: str = ""

@@ -385,12 +385,15 @@ class AgentController:
         task = state["task"]
         session = state["session"]
 
+        session_memory = self.context_compressor.retrieve(session, task.intent, task.input, limit=5)
+        task.entities["session_memory"] = session_memory
+
         if task.intent in {"ops_qa", "knowledge_write"}:
             import json
-            qa_memory = getattr(session, "qa_memory", []) or []
+            qa_memory = session_memory.get("qa_memory", [])
             if qa_memory:
                 qa_turns = [
-                    {"question": turn.question, "answer": turn.answer}
+                    {"question": turn.get("question", ""), "answer": turn.get("answer", "")}
                     for turn in qa_memory[-5:]
                 ]
             else:

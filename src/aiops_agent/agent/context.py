@@ -190,8 +190,8 @@ class ContextCompressor:
         limit = max(0, int(limit))
         matches = self._rank_task_index(session, intent, query, limit)
         return {
-            "summary": session.summary,
-            "rolling_summary": session.rolling_summary,
+            "summary": getattr(session, "summary", ""),
+            "rolling_summary": getattr(session, "rolling_summary", ""),
             "qa_memory": [asdict(turn) for turn in self._qa_for_intent(session, intent)],
             "short_term": [asdict(turn) for turn in self._short_term_for_intent(session, intent, query)],
             "browser_memory": asdict(getattr(session, "browser_memory", None) or BrowserMemory()),
@@ -351,12 +351,13 @@ class ContextCompressor:
         return "".join(parts) or session.rolling_summary or "当前 session 暂无可总结的上下文。"
 
     def _qa_for_intent(self, session: AgentSession, intent: str) -> list[QATurn]:
+        qa_memory = getattr(session, "qa_memory", []) or []
         if intent in {"ops_qa", "knowledge_write"}:
-            return session.qa_memory[-5:]
-        return session.qa_memory[-2:]
+            return qa_memory[-5:]
+        return qa_memory[-2:]
 
     def _short_term_for_intent(self, session: AgentSession, intent: str, query: str) -> list[ShortTermTurn]:
-        turns = session.short_term[-10:]
+        turns = (getattr(session, "short_term", []) or [])[-10:]
         if intent in {"ops_qa", "knowledge_write"}:
             return [turn for turn in turns if turn.intent in {"ops_qa", "knowledge_write"}][-5:] or turns[-5:]
         if intent == "general_chat":
@@ -401,7 +402,7 @@ class ContextCompressor:
                     value += 5
             return value, index
 
-        scored = [(score((index, entry)), entry) for index, entry in enumerate(session.task_index)]
+        scored = [(score((index, entry)), entry) for index, entry in enumerate(getattr(session, "task_index", []) or [])]
         ranked = sorted(scored, key=lambda item: item[0], reverse=True)
         return [entry for (value, _index), entry in ranked if value > 0][:limit]
 
