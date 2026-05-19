@@ -4,6 +4,7 @@ import argparse
 import logging
 
 from aiops_agent.agent.controller import AgentController
+from aiops_agent.agent.context import ContextCompressor
 from aiops_agent.agent.parser import IntentParser
 from aiops_agent.agent.summarizer import ResultSummarizer
 from aiops_agent.audit.logger import FileAuditLogger
@@ -278,6 +279,7 @@ def create_controller(
         audit_logger=audit_logger,
         session_store=session_store,
         planning_service=PlanningService(web_skill_matcher=web_skill_matcher),
+        context_compressor=ContextCompressor(llm_provider=provider),
         browser_sites_config=browser_sites_config,
         web_skill_generator=web_skill_generator,
         credential_ref_resolver=credential_store.default_ref_for_site,

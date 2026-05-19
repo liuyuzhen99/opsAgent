@@ -135,6 +135,55 @@ class LangChainLLMProvider(BaseLLMProvider):
         log_kv(self.logger, logging.INFO, "LangChain model invocation succeeded", role="chat", model=self._resolve_model("chat"))
         return raw_text
 
+    def summarize_session_memory(self, memory_facts: dict[str, Any]) -> str:
+        if not self.enabled:
+            raise LLMError("LLM session memory summary disabled")
+
+        model = self._build_model("summary")
+        try:
+            response = model.invoke(
+                [
+                    SystemMessage(
+                        content=(
+                            "You summarize current-session memory for an enterprise AIOps agent. "
+                            "Use only the provided sanitized facts. Do not invent details, do not output "
+                            "credentials, secrets, tokens, passwords, or local browser state paths. "
+                            "Write concise plain text suitable as a durable session summary."
+                        )
+                    ),
+                    HumanMessage(
+                        content=(
+                            "Summarize the user's current session goal, completed work, and reusable context. "
+                            "Keep it short.\n"
+                            f"memory_facts: {json.dumps(memory_facts, ensure_ascii=False)}"
+                        )
+                    ),
+                ]
+            )
+        except Exception as exc:  # pragma: no cover - network and SDK errors vary.
+            raise LLMError(f"LLM request failed: {exc}") from exc
+
+        raw_text = getattr(response, "content", "")
+        if isinstance(raw_text, list):
+            fragments: list[str] = []
+            for item in raw_text:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    fragments.append(str(item.get("text", "")))
+                elif hasattr(item, "text"):
+                    fragments.append(str(getattr(item, "text")))
+            raw_text = "".join(fragments)
+        raw_text = str(raw_text).strip()
+        if not raw_text:
+            raise LLMError("LLM returned empty content")
+        log_kv(
+            self.logger,
+            logging.INFO,
+            "LangChain model invocation succeeded",
+            role="summary",
+            model=self._resolve_model("summary"),
+        )
+        return raw_text
+
     def plan_browser_action(
         self,
         *,

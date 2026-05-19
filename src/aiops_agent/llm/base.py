@@ -46,6 +46,9 @@ class BaseLLMProvider:
     def generate_chat_reply(self, text: str, context: dict[str, Any] | None = None) -> str:
         raise NotImplementedError
 
+    def summarize_session_memory(self, memory_facts: dict[str, Any]) -> str:
+        raise NotImplementedError
+
     def plan_browser_action(
         self,
         *,

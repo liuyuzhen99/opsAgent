@@ -251,7 +251,9 @@ class AgentController:
         session = self.session_store.load(session_id)
         if session is None:
             raise ValueError(f"当前 session 尚未持久化: {session_id}")
-        task_id = session.metadata.get("browser_last_success_task_id")
+        metadata = getattr(session, "metadata", {}) or {}
+        browser_memory = getattr(session, "browser_memory", None)
+        task_id = getattr(browser_memory, "last_success_task_id", None) or metadata.get("browser_last_success_task_id")
         if not task_id:
             raise ValueError("当前 session 没有最近一次成功的 web_action。")
         task = self.task_manager.load(task_id)
@@ -385,11 +387,19 @@ class AgentController:
 
         if task.intent in {"ops_qa", "knowledge_write"}:
             import json
-            raw_turns = session.metadata.get("qa_turns", "")
-            try:
-                qa_turns = json.loads(raw_turns) if raw_turns else []
-            except (json.JSONDecodeError, ValueError):
-                qa_turns = []
+            qa_memory = getattr(session, "qa_memory", []) or []
+            if qa_memory:
+                qa_turns = [
+                    {"question": turn.question, "answer": turn.answer}
+                    for turn in qa_memory[-5:]
+                ]
+            else:
+                metadata = getattr(session, "metadata", {}) or {}
+                raw_turns = metadata.get("qa_turns", "")
+                try:
+                    qa_turns = json.loads(raw_turns) if raw_turns else []
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    qa_turns = []
             task.entities["conversation_history"] = qa_turns[-5:]
 
         plan = self.planning_service.plan(task.input, task.intent, task.entities)
@@ -660,19 +670,6 @@ class AgentController:
         task = state["task"]
         session = state["session"]
         session.last_task_id = task.id
-
-        if task.intent == "ops_qa" and task.status == "success":
-            import json
-            answer_block = (task.result or {}).get("data", {}).get("answer", {})
-            answer_text = answer_block.get("answer", "") if isinstance(answer_block, dict) else ""
-            if answer_text:
-                raw_turns = session.metadata.get("qa_turns", "")
-                try:
-                    qa_turns = json.loads(raw_turns) if raw_turns else []
-                except (json.JSONDecodeError, ValueError):
-                    qa_turns = []
-                qa_turns.append({"question": task.input, "answer": answer_text})
-                session.metadata["qa_turns"] = json.dumps(qa_turns[-5:], ensure_ascii=False)
 
         if task.intent == "knowledge_write":
             data = (task.result or {}).get("data") or {}
