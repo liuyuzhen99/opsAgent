@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import asdict
 from typing import TypedDict
 
 from langgraph.graph import END, StateGraph
@@ -157,8 +158,22 @@ class AgentController:
             raise ValueError(f"任务不是等待确认状态: {task.status}")
         result_data = (task.result or {}).get("data") or {}
         pending_action = result_data.get("pending_action_raw")
-        if not pending_action:
-            raise ValueError("任务缺少待确认动作，无法恢复执行")
+        if pending_action:
+            return self._confirm_browser_action(task, result_data, progress_callback)
+
+        confirmation_type = result_data.get("confirmation_type") or (result_data.get("confirmation") or {}).get("type")
+        if confirmation_type == "plan":
+            return self._confirm_plan(task, result_data, progress_callback)
+
+        raise ValueError("任务缺少待确认动作或计划确认上下文，无法恢复执行")
+
+    def _confirm_browser_action(
+        self,
+        task: Task,
+        result_data: dict,
+        progress_callback: Callable[[ProgressEvent], None] | None,
+    ) -> Task:
+        pending_action = result_data.get("pending_action_raw")
         if not task.tool_calls:
             raise ValueError("任务缺少工具调用，无法恢复执行")
 
@@ -199,40 +214,168 @@ class AgentController:
                 },
             )
         )
-        try:
-            tool_result = self.tool_executor.execute(call_spec)
-        except ToolError as exc:
-            self.task_manager.mark_failed(task, {"success": False, "error": str(exc), "data": {}})
-        else:
-            task.artifacts.extend(tool_result.artifacts)
-            result_status = (tool_result.data or {}).get("status")
-            if tool_result.success:
-                self.task_manager.mark_success(task, tool_result.to_dict())
-            elif result_status == "awaiting_confirmation":
-                self.task_manager.mark_awaiting_confirmation(task, tool_result.to_dict())
-            elif result_status == "blocked":
-                self.task_manager.mark_blocked(task, tool_result.to_dict())
-            else:
-                self.task_manager.mark_failed(task, tool_result.to_dict())
-        task.report = self.summarizer.summarize(task, task.result or {})
-        self._emit(
-            progress_callback,
-            ProgressEvent(stage="summary.ready", message="已生成执行摘要。", task_id=task.id, session_id=task.session_id),
-        )
-        self.task_manager.persist(task)
+        self._execute_confirmed_tool_call(task, call_spec, progress_callback)
+        return self._finalize_confirmed_task(task, progress_callback)
+
+    def _confirm_plan(
+        self,
+        task: Task,
+        result_data: dict,
+        progress_callback: Callable[[ProgressEvent], None] | None,
+    ) -> Task:
+        result_data["confirmed"] = True
+        confirmation = dict(result_data.get("confirmation") or {})
+        confirmation["type"] = confirmation.get("type") or "plan"
+        confirmation["confirmed"] = True
+        result_data["confirmation"] = confirmation
+        if task.result is not None:
+            task.result["data"] = result_data
+
         self.audit_logger.record(
             AuditEvent(
-                event_type="task.completed",
+                event_type="confirmation.confirmed",
                 trace_id=task.trace_id,
                 task_id=task.id,
                 status=task.status,
                 details={
                     "session_id": task.session_id,
-                    "result_success": bool(task.result and task.result.get("success")),
-                    "error": (task.result or {}).get("error"),
+                    "confirmation_type": "plan",
+                    "resume_node": result_data.get("resume_node"),
+                    "pending_tool_count": len(result_data.get("pending_tool_calls") or []),
                 },
             )
         )
+        pending_tool_calls = self._deserialize_tool_calls(result_data.get("pending_tool_calls") or [])
+        task.tool_calls = pending_tool_calls
+        if not pending_tool_calls:
+            self.task_manager.mark_blocked(
+                task,
+                {
+                    "success": False,
+                    "error": "用户已确认，但当前任务没有可执行工具。",
+                    "data": {
+                        "status": "blocked",
+                        "block_reason": "confirmed_without_executable_tool",
+                        "intent": task.intent,
+                        "entities": task.entities,
+                        "plan_steps": task.plan.steps if task.plan else result_data.get("plan_steps", []),
+                        "confirmation_type": "plan",
+                        "confirmation_summary": result_data.get("confirmation_summary") or {},
+                        "pending_tool_calls": [],
+                        "confirmation": confirmation,
+                    },
+                },
+            )
+            return self._finalize_confirmed_task(task, progress_callback)
+
+        call_spec = pending_tool_calls[0]
+        call_spec.params = dict(call_spec.params)
+        call_spec.params.setdefault("trace_id", task.trace_id)
+        call_spec.params.setdefault("task_id", task.id)
+        call_spec.params.setdefault("session_id", task.session_id)
+        call_spec.params["max_steps"] = task.max_steps
+        self.task_manager.mark_running(task)
+        self._emit(
+            progress_callback,
+            ProgressEvent(
+                stage="tool.running",
+                message="已确认，正在执行工具。",
+                task_id=task.id,
+                session_id=task.session_id,
+            ),
+        )
+        self._execute_confirmed_tool_call(task, call_spec, progress_callback)
+        return self._finalize_confirmed_task(task, progress_callback)
+
+    def _deserialize_tool_calls(self, raw_calls: list) -> list[ToolCallSpec]:
+        calls: list[ToolCallSpec] = []
+        for item in raw_calls:
+            if isinstance(item, ToolCallSpec):
+                calls.append(item)
+            elif isinstance(item, dict):
+                calls.append(ToolCallSpec(**item))
+        return calls
+
+    def _execute_confirmed_tool_call(
+        self,
+        task: Task,
+        call_spec: ToolCallSpec,
+        progress_callback: Callable[[ProgressEvent], None] | None,
+    ) -> None:
+        try:
+            tool_result = self.tool_executor.execute(call_spec)
+        except ToolError as exc:
+            self.task_manager.mark_failed(task, {"success": False, "error": str(exc), "data": {}})
+            return
+
+        task.artifacts.extend(tool_result.artifacts)
+        self.audit_logger.record(
+            AuditEvent(
+                event_type="tool_called",
+                trace_id=task.trace_id,
+                task_id=task.id,
+                status=task.status,
+                details={
+                    "tool_name": call_spec.tool_name,
+                    "action": call_spec.action,
+                    "risk_level": call_spec.risk_level,
+                },
+            )
+        )
+        fallback_result = self._try_skill_fallback(call_spec, tool_result, task, progress_callback)
+        if fallback_result is not None:
+            tool_result = fallback_result
+            task.artifacts.extend(tool_result.artifacts)
+        result_status = (tool_result.data or {}).get("status")
+        if tool_result.success:
+            self.task_manager.mark_success(task, tool_result.to_dict())
+        elif result_status == "awaiting_confirmation":
+            self.task_manager.mark_awaiting_confirmation(task, tool_result.to_dict())
+        elif result_status == "blocked":
+            self.task_manager.mark_blocked(task, tool_result.to_dict())
+        else:
+            self.task_manager.mark_failed(task, tool_result.to_dict())
+
+    def _finalize_confirmed_task(
+        self,
+        task: Task,
+        progress_callback: Callable[[ProgressEvent], None] | None,
+    ) -> Task:
+        task.report = self.summarizer.summarize(task, task.result or {})
+        self._emit(
+            progress_callback,
+            ProgressEvent(stage="summary.ready", message="已生成执行摘要。", task_id=task.id, session_id=task.session_id),
+        )
+        session = self.session_store.load(task.session_id) if task.session_id else None
+        if session is not None:
+            session.last_task_id = task.id
+            session = self.context_compressor.compress(session, task)
+            self.session_store.save(session)
+            self.audit_logger.record(
+                AuditEvent(
+                    event_type="memory.compressed",
+                    trace_id=task.trace_id,
+                    task_id=task.id,
+                    status=task.status,
+                    details={"session_id": session.id, "summary": session.rolling_summary},
+                )
+            )
+        self.task_manager.persist(task)
+        completion_details = {
+            "session_id": task.session_id,
+            "result_success": bool(task.result and task.result.get("success")),
+            "error": (task.result or {}).get("error"),
+        }
+        for event_type in ("task.completed", "task_completed"):
+            self.audit_logger.record(
+                AuditEvent(
+                    event_type=event_type,
+                    trace_id=task.trace_id,
+                    task_id=task.id,
+                    status=task.status,
+                    details=completion_details,
+                )
+            )
         self._emit(
             progress_callback,
             ProgressEvent(
@@ -482,11 +625,7 @@ class AgentController:
                 {
                     "success": False,
                     "error": decision.reason,
-                    "data": {
-                        "intent": task.intent,
-                        "entities": task.entities,
-                        "plan_steps": task.plan.steps if task.plan else [],
-                    },
+                    "data": self._build_plan_confirmation_payload(task, decision),
                 },
             )
             event_type = "confirmation_requested"
@@ -534,6 +673,35 @@ class AgentController:
 
     def _route_after_policy(self, state: OrchestrationState) -> str:
         return state["next_node"]
+
+    def _build_plan_confirmation_payload(self, task: Task, decision) -> dict:
+        plan_steps = task.plan.steps if task.plan else []
+        summary = {
+            "current_page": "-",
+            "current_url": "-",
+            "prepared_action": task.plan.goal if task.plan else task.input,
+            "target": task.entities.get("target_permission")
+            or task.entities.get("system")
+            or task.entities.get("raw_text")
+            or task.input,
+            "expected_outcome": "确认后继续执行计划工具。"
+            if task.tool_calls
+            else "确认后记录治理结果；当前没有接入实际执行工具。",
+        }
+        payload = {
+            "status": "awaiting_confirmation",
+            "intent": task.intent,
+            "entities": task.entities,
+            "plan_steps": plan_steps,
+            "confirmation_summary": summary,
+            "pending_tool_calls": [asdict(call) for call in task.tool_calls],
+            "confirmation": {
+                "type": "plan",
+                "confirmed": False,
+            },
+        }
+        payload.update(decision.data or {})
+        return payload
 
     def _tool_execute_node(self, state: OrchestrationState) -> OrchestrationState:
         task = state["task"]

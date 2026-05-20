@@ -15,6 +15,11 @@ class PolicyEngine:
                 risk_level=risk_level,
                 reason="检测到高风险或需人工确认的任务，已进入等待确认状态。",
                 status="awaiting_confirmation",
+                data={
+                    "confirmation_type": "plan",
+                    "resume_node": "tool_execute",
+                    "confirmed": False,
+                },
             )
 
         return PolicyDecision(

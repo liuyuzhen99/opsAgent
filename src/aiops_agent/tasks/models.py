@@ -61,6 +61,7 @@ class PolicyDecision:
     risk_level: str
     reason: str = ""
     status: str = "approved"
+    data: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

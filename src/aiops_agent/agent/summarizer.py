@@ -82,6 +82,8 @@ class ResultSummarizer:
             return "请先完成人工确认，再继续执行高风险任务。"
 
         if status == "blocked":
+            if data.get("block_reason") == "confirmed_without_executable_tool":
+                return "用户已确认当前治理计划，但任务没有可执行工具。请接入权限变更或目标执行工具后再执行。"
             return "当前任务已被策略阻断，请根据提示调整任务或等待后续能力开放。"
 
         if "暂不支持" in error:

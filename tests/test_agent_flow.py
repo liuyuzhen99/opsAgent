@@ -272,9 +272,79 @@ def test_permission_change_enters_confirmation_state(tmp_path, monkeypatch):
 
     assert task.status == "awaiting_confirmation"
     assert task.risk_level == "high_risk_change"
+    assert task.result["data"]["status"] == "awaiting_confirmation"
+    assert task.result["data"]["confirmation_type"] == "plan"
+    assert task.result["data"]["confirmation_summary"]["prepared_action"]
+    assert task.result["data"]["pending_tool_calls"] == []
     assert "人工确认" in (task.report or "")
     session_files = list((tmp_path / "storage" / "sessions").glob("*.json"))
     assert len(session_files) == 1
+
+
+def test_permission_change_confirm_without_tool_becomes_blocked(tmp_path, monkeypatch):
+    config_path = tmp_path / "rpa.json"
+    llm_config_path = tmp_path / "llm.json"
+    _write_rpa_config(config_path)
+    _write_llm_config(llm_config_path, enabled=False)
+    monkeypatch.chdir(tmp_path)
+
+    controller = create_controller(str(config_path), str(llm_config_path))
+    task = controller.run("给张三开通生产权限")
+    confirmed = controller.confirm(task.id)
+
+    assert confirmed.status == "blocked"
+    assert confirmed.result["data"]["block_reason"] == "confirmed_without_executable_tool"
+    assert confirmed.result["data"]["confirmation"]["confirmed"] is True
+    assert "当前任务没有可执行工具" in (confirmed.report or "")
+    audit_lines = (tmp_path / "storage" / "audit" / "events.jsonl").read_text(encoding="utf-8")
+    assert "confirmation.confirmed" in audit_lines
+    assert "task_completed" in audit_lines
+
+
+def test_require_confirmation_resumes_tool_execution_after_confirm(tmp_path, monkeypatch):
+    config_path = tmp_path / "rpa.json"
+    llm_config_path = tmp_path / "llm.json"
+    _write_rpa_config(config_path)
+    _write_llm_config(llm_config_path, enabled=False)
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_urlopen(req, timeout):
+        assert req.full_url == "http://rpa.example.com/api/v1/flows/flow-001/run"
+        return FakeResponse(
+            {
+                "success": True,
+                "result": "healthy",
+                "anomalies": [],
+                "operation_log": ["inspection completed"],
+            }
+        )
+
+    monkeypatch.setattr("aiops_agent.tools.inspection.request.urlopen", fake_urlopen)
+    monkeypatch.chdir(tmp_path)
+
+    controller = create_controller(str(config_path), str(llm_config_path))
+    task = controller.run("巡检生产环境 WebLogic", require_confirmation=True)
+
+    assert task.status == "awaiting_confirmation"
+    assert task.result["data"]["confirmation_type"] == "plan"
+    assert len(task.result["data"]["pending_tool_calls"]) == 1
+
+    confirmed = controller.confirm(task.id)
+
+    assert confirmed.status == "success"
+    assert confirmed.result["data"]["inspection_result"] == "healthy"
 
 
 def test_web_action_side_effect_enters_confirmation_state(tmp_path, monkeypatch):
