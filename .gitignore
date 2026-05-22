@@ -4,3 +4,5 @@ __pycache__/
 .venv/
 configs/
 storage/
+src/aiops_agent/__pycache__/
+src/aiops_agent/*.pyc
