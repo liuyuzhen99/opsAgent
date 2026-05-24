@@ -49,6 +49,8 @@ class SessionTaskIndexEntry:
     status: str
     system: str = ""
     env: str = ""
+    target: str = ""
+    capability: str = ""
     site_key: str = ""
     url: str = ""
     title: str = ""

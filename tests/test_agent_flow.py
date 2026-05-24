@@ -18,6 +18,19 @@ def _write_rpa_config(path, platform_url="http://rpa.example.com", token="secret
                     "default_env": "prod",
                     "flow_map": {"WebLogic": "flow-001"},
                 },
+                "rpa_actions": {
+                    "targets": {
+                        "120.13": {
+                            "ssh": "ssh-flow-12013",
+                            "sftp": "sftp-flow-12013",
+                        },
+                        "120.11": {
+                            "ssh": "ssh-flow-12011",
+                            "sftp": "sftp-flow-12011",
+                            "db": "db-flow-12011",
+                        },
+                    }
+                },
                 "shadowbot": {
                     "executable_path": "",
                     "robot_uuid": "",
@@ -83,7 +96,7 @@ def test_agent_run_success_flow(tmp_path, monkeypatch):
             }
         )
 
-    monkeypatch.setattr("aiops_agent.tools.inspection.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("aiops_agent.tools.rpa_runner.request.urlopen", fake_urlopen)
     monkeypatch.chdir(tmp_path)
 
     controller = create_controller(str(config_path), str(llm_config_path))
@@ -97,6 +110,69 @@ def test_agent_run_success_flow(tmp_path, monkeypatch):
     assert len(saved_files) >= 1
     audit_lines = (tmp_path / "storage" / "audit" / "events.jsonl").read_text(encoding="utf-8").strip().splitlines()
     assert len(audit_lines) >= 3
+
+
+def test_rpa_action_login_calls_configured_flow_api(tmp_path, monkeypatch):
+    config_path = tmp_path / "rpa.json"
+    llm_config_path = tmp_path / "llm.json"
+    _write_rpa_config(config_path)
+    _write_llm_config(llm_config_path, enabled=False)
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_urlopen(req, timeout):
+        assert req.full_url == "http://rpa.example.com/api/v1/flows/ssh-flow-12013/run"
+        assert timeout == 5
+        body = json.loads(req.data.decode("utf-8"))
+        assert body["target"] == "120.13"
+        assert body["capability"] == "ssh"
+        assert body["operation"] == "login"
+        return FakeResponse(
+            {
+                "success": True,
+                "result": "completed",
+                "operation_log": ["ssh login launched"],
+            }
+        )
+
+    monkeypatch.setattr("aiops_agent.tools.rpa_runner.request.urlopen", fake_urlopen)
+    monkeypatch.chdir(tmp_path)
+
+    controller = create_controller(str(config_path), str(llm_config_path))
+    task = controller.run("登录 120.13 ssh")
+
+    assert task.status == "success"
+    assert task.intent == "rpa_action"
+    assert task.result["data"]["target"] == "120.13"
+    assert task.result["data"]["capability"] == "ssh"
+    assert task.result["data"]["flow_id"] == "ssh-flow-12013"
+    assert "已启动目标 120.13 的 ssh 登录 RPA" in (task.report or "")
+
+
+def test_rpa_action_missing_capability_returns_clear_error(tmp_path, monkeypatch):
+    config_path = tmp_path / "rpa.json"
+    llm_config_path = tmp_path / "llm.json"
+    _write_rpa_config(config_path)
+    _write_llm_config(llm_config_path, enabled=False)
+    monkeypatch.chdir(tmp_path)
+
+    controller = create_controller(str(config_path), str(llm_config_path))
+    task = controller.run("登录 120.13 数据库")
+
+    assert task.status == "failed"
+    assert task.result["error"] == "配置缺失: 未配置 120.13 的 db 登录 RPA"
+    assert "RPA 登录启动失败" in (task.report or "")
 
 
 def test_agent_run_config_failure(tmp_path, monkeypatch):
@@ -161,7 +237,7 @@ def test_agent_uses_llm_parser_before_rule_fallback(tmp_path, monkeypatch):
             }
         )
 
-    monkeypatch.setattr("aiops_agent.tools.inspection.request.urlopen", fake_rpa_urlopen)
+    monkeypatch.setattr("aiops_agent.tools.rpa_runner.request.urlopen", fake_rpa_urlopen)
     monkeypatch.chdir(tmp_path)
 
     controller = create_controller(
@@ -252,12 +328,79 @@ def test_shadowbot_local_mode_launches_on_windows(tmp_path, monkeypatch):
         assert timeout == 10
         return FakeCompletedProcess()
 
-    monkeypatch.setattr("aiops_agent.tools.inspection.platform.system", lambda: "Windows")
-    monkeypatch.setattr("aiops_agent.tools.inspection.subprocess.run", fake_run)
+    monkeypatch.setattr("aiops_agent.tools.rpa_runner.platform.system", lambda: "Windows")
+    monkeypatch.setattr("aiops_agent.tools.rpa_runner.subprocess.run", fake_run)
     monkeypatch.chdir(tmp_path)
 
     controller = create_controller(str(config_path), str(llm_config_path))
     task = controller.run("巡检生产环境 WebLogic")
+
+
+def test_rpa_action_shadowbot_local_uses_target_flow_uuid(tmp_path, monkeypatch):
+    config_path = tmp_path / "rpa.json"
+    llm_config_path = tmp_path / "llm.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "provider": "yidao",
+                "execution_mode": "shadowbot_local",
+                "platform_url": "",
+                "timeout_seconds": 5,
+                "auth": {"type": "bearer", "token": ""},
+                "inspection": {
+                    "default_system": "WebLogic",
+                    "default_env": "prod",
+                    "flow_map": {"WebLogic": "inspection-flow"},
+                },
+                "rpa_actions": {
+                    "targets": {
+                        "120.13": {
+                            "ssh": "ssh-flow-12013",
+                            "sftp": "sftp-flow-12013",
+                        }
+                    }
+                },
+                "shadowbot": {
+                    "executable_path": "D:\\Program Files\\ShadowBot\\ShadowBot.exe",
+                    "robot_uuid": "global-robot-uuid",
+                    "command_timeout_seconds": 10,
+                    "result_file": "",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_llm_config(llm_config_path, enabled=False)
+
+    class FakeCompletedProcess:
+        stdout = ""
+        stderr = ""
+
+    def fake_run(command, check, capture_output, text, timeout):
+        assert command == [
+            "cmd",
+            "/c",
+            "start",
+            "",
+            "D:\\Program Files\\ShadowBot\\ShadowBot.exe",
+            "shadowbot:Run?robot-uuid=sftp-flow-12013",
+        ]
+        assert check is True
+        assert capture_output is True
+        assert text is True
+        assert timeout == 10
+        return FakeCompletedProcess()
+
+    monkeypatch.setattr("aiops_agent.tools.rpa_runner.platform.system", lambda: "Windows")
+    monkeypatch.setattr("aiops_agent.tools.rpa_runner.subprocess.run", fake_run)
+    monkeypatch.chdir(tmp_path)
+
+    controller = create_controller(str(config_path), str(llm_config_path))
+    task = controller.run("打开 120.13 的 sftp")
+
+    assert task.status == "success"
+    assert task.result["data"]["action_result"] == "launched"
+    assert task.result["data"]["flow_id"] == "sftp-flow-12013"
 
 
 def test_permission_change_enters_confirmation_state(tmp_path, monkeypatch):
@@ -331,7 +474,7 @@ def test_require_confirmation_resumes_tool_execution_after_confirm(tmp_path, mon
             }
         )
 
-    monkeypatch.setattr("aiops_agent.tools.inspection.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("aiops_agent.tools.rpa_runner.request.urlopen", fake_urlopen)
     monkeypatch.chdir(tmp_path)
 
     controller = create_controller(str(config_path), str(llm_config_path))

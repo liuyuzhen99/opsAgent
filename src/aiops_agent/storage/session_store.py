@@ -227,6 +227,8 @@ class FileSessionStore:
                     status=self._string(item.get("status")),
                     system=self._string(item.get("system")),
                     env=self._string(item.get("env")),
+                    target=self._string(item.get("target")),
+                    capability=self._string(item.get("capability")),
                     site_key=self._string(item.get("site_key")),
                     url=self._string(item.get("url")),
                     title=self._string(item.get("title")),

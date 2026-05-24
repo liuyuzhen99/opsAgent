@@ -14,7 +14,15 @@ from aiops_agent.support.logging import log_kv
 
 
 class LangChainLLMProvider(BaseLLMProvider):
-    SUPPORTED_INTENTS = {"inspection", "permission_change", "ops_qa", "knowledge_write", "web_action", "general_chat"}
+    SUPPORTED_INTENTS = {
+        "inspection",
+        "rpa_action",
+        "permission_change",
+        "ops_qa",
+        "knowledge_write",
+        "web_action",
+        "general_chat",
+    }
 
     def __init__(self, config: LLMProviderConfig):
         self.config = config
@@ -32,15 +40,17 @@ class LangChainLLMProvider(BaseLLMProvider):
 
         prompt = (
             "Parse the enterprise AIOps request into JSON.\n"
-            "Schema: {\"intent\": \"inspection|permission_change|ops_qa|knowledge_write|web_action|general_chat\", \"entities\": {...}}\n"
+            "Schema: {\"intent\": \"inspection|rpa_action|permission_change|ops_qa|knowledge_write|web_action|general_chat\", \"entities\": {...}}\n"
             "Intent definitions:\n"
             "  inspection: user wants to inspect/check system health or status\n"
+            "  rpa_action: user wants to launch an SSH, SFTP, or database client login RPA for a target server or datasource\n"
             "  permission_change: user wants to grant/revoke access or permissions\n"
             "  ops_qa: user asks about ops knowledge, procedures, troubleshooting steps, system explanations, runbooks, or incident handling — does NOT need actual execution\n"
             "  knowledge_write: user explicitly asks to save, record, or distill the current discussion into the Obsidian knowledge vault\n"
             "  web_action: user wants to open a browser, visit a URL, click UI elements, fill forms, or automate web operations\n"
             "  general_chat: greetings, small talk, or requests unrelated to enterprise ops\n"
             "Use knowledge_write for explicit phrases like 记录到知识库, 保存到知识库, 添加入知识库, 写入知识库, 沉淀文档, 写入 vault, 整理成知识库, or 生成 knowledge.\n"
+            "Use rpa_action for phrases like 登录 120.13 ssh, 打开 120.13 的 sftp, 登录 120.11 数据库, or 登录服务器.\n"
             "Use general_chat for greetings, small talk, or requests that are not enterprise ops tasks.\n"
             f"text: {text}\n"
             f"default_system: {defaults['system']}\n"

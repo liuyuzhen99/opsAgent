@@ -55,6 +55,26 @@ class ResultSummarizer:
             answer_text = answer_block.get("answer") if isinstance(answer_block, dict) else ""
             if answer_text:
                 return str(answer_text)
+        if task.intent == "rpa_action":
+            target = data.get("target") or (task.entities or {}).get("target") or "-"
+            capability = data.get("capability") or (task.entities or {}).get("capability") or "-"
+            flow_id = data.get("flow_id") or "-"
+            action_result = data.get("action_result") or "-"
+            if tool_result.get("success"):
+                return "\n".join(
+                    [
+                        f"已启动目标 {target} 的 {capability} 登录 RPA。",
+                        f"流程 UUID：{flow_id}",
+                        f"执行结果：{action_result}",
+                    ]
+                )
+            return "\n".join(
+                [
+                    f"RPA 登录启动失败：{tool_result.get('error') or '未知错误'}",
+                    f"目标：{target}",
+                    f"类型：{capability}",
+                ]
+            )
         error = tool_result.get("error") or "无"
         suggestions = self._build_suggestion(task.status, data, error)
         lines = [

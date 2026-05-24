@@ -18,6 +18,25 @@ def test_parse_inspection_entities_from_chinese_text():
     assert result.entities["env"] == "prod"
 
 
+def test_parse_rpa_action_login_entities():
+    parser = IntentParser()
+
+    ssh_result = parser.parse("登录 120.13 ssh")
+    sftp_result = parser.parse("打开 120.13 的 sftp")
+    db_result = parser.parse("登录 120.11 数据库")
+    default_ssh_result = parser.parse("登录服务器 120.12")
+
+    assert ssh_result.intent == "rpa_action"
+    assert ssh_result.entities["target"] == "120.13"
+    assert ssh_result.entities["capability"] == "ssh"
+    assert sftp_result.intent == "rpa_action"
+    assert sftp_result.entities["capability"] == "sftp"
+    assert db_result.intent == "rpa_action"
+    assert db_result.entities["capability"] == "db"
+    assert default_ssh_result.intent == "rpa_action"
+    assert default_ssh_result.entities["capability"] == "ssh"
+
+
 def test_parse_non_inspection_as_permission_or_qa():
     parser = IntentParser()
 

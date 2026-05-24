@@ -31,6 +31,7 @@ from aiops_agent.tools.executor import ToolExecutor
 from aiops_agent.tools.chat import ChatTool
 from aiops_agent.tools.inspection import InspectionTool
 from aiops_agent.tools.knowledge import KnowledgeTool, KnowledgeWriteTool
+from aiops_agent.tools.rpa_action import RPAActionTool
 from aiops_agent.tools.registry import ToolRegistry
 
 
@@ -219,6 +220,14 @@ def create_controller(
         risk_level="read_only",
         description="Run structured inspection flow via RPA",
         tags=["inspection", "rpa"],
+        timeout_seconds=rpa_config.timeout_seconds,
+    )
+    registry.register(
+        "rpa_action",
+        RPAActionTool(rpa_config),
+        risk_level="controlled_rpa_login",
+        description="Launch configured SSH/SFTP/DB login RPA flows",
+        tags=["rpa", "ssh", "sftp", "db", "login"],
         timeout_seconds=rpa_config.timeout_seconds,
     )
     registry.register(

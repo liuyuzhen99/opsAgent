@@ -17,6 +17,8 @@ class IntentResult:
 
 class IntentParser:
     INSPECTION_KEYWORDS = ("巡检", "检查", "inspect", "inspection")
+    RPA_ACTION_KEYWORDS = ("ssh", "sftp", "数据库", "db", "pl/sql", "plsql", "服务器")
+    RPA_LOGIN_VERBS = ("登录", "打开", "连接", "进入", "login", "open", "connect")
     PERMISSION_KEYWORDS = ("权限", "授权", "permission", "grant")
     KNOWLEDGE_WRITE_KEYWORDS = (
         "记录到知识库",
@@ -94,6 +96,9 @@ class IntentParser:
         explicit_write = self._parse_explicit_knowledge_write(normalized)
         if explicit_write is not None:
             return explicit_write
+        explicit_rpa_action = self._parse_explicit_rpa_action(normalized)
+        if explicit_rpa_action is not None:
+            return explicit_rpa_action
 
         llm_result = self._parse_with_llm(normalized)
         if llm_result is not None:
@@ -120,6 +125,33 @@ class IntentParser:
             },
         )
 
+    def _parse_explicit_rpa_action(self, normalized: str) -> IntentResult | None:
+        lowered = normalized.lower()
+        has_rpa_keyword = any(keyword in lowered for keyword in self.RPA_ACTION_KEYWORDS)
+        has_login_verb = any(keyword in lowered for keyword in self.RPA_LOGIN_VERBS)
+        has_explicit_login_command = any(keyword in lowered for keyword in ("登录", "打开", "进入", "login", "open"))
+        target = self._extract_rpa_target(normalized)
+        capability = self._extract_rpa_capability(normalized)
+        if self._extract_url(normalized) and not (capability or "服务器" in lowered):
+            return None
+        if not (
+            (capability and (has_explicit_login_command or target))
+            or ("服务器" in lowered and has_explicit_login_command)
+            or (target and has_login_verb)
+        ):
+            return None
+        if not has_rpa_keyword and not target:
+            return None
+        return IntentResult(
+            intent="rpa_action",
+            entities={
+                "target": target,
+                "capability": capability or "ssh",
+                "operation": "login",
+                "raw_text": normalized,
+            },
+        )
+
     def _parse_with_llm(self, text: str) -> IntentResult | None:
         if self.llm_provider is None:
             return None
@@ -136,6 +168,10 @@ class IntentParser:
         entities = dict(parsed.entities)
         if parsed.intent == "knowledge_write":
             entities.setdefault("system", None)
+        elif parsed.intent == "rpa_action":
+            entities.setdefault("target", self._extract_rpa_target(text))
+            entities.setdefault("capability", self._extract_rpa_capability(text) or "ssh")
+            entities.setdefault("operation", "login")
         else:
             entities.setdefault("system", self.default_system)
         entities.setdefault("env", self.default_env)
@@ -213,6 +249,25 @@ class IntentParser:
         match = re.search(r"https?://[^\s，。；,;]+", text, flags=re.IGNORECASE)
         if match:
             return match.group(0).rstrip("。,.，")
+        return None
+
+    def _extract_rpa_target(self, text: str) -> str | None:
+        match = re.search(r"(?<![0-9.])\d{2,3}(?:\.\d{1,3}){1,3}(?![0-9.])", text)
+        if match:
+            return match.group(0)
+        return None
+
+    def _extract_rpa_capability(self, text: str) -> str | None:
+        lowered = text.lower()
+        if "sftp" in lowered:
+            return "sftp"
+        if "ssh" in lowered:
+            return "ssh"
+        if (
+            any(keyword in lowered for keyword in ("数据库", "pl/sql", "plsql", "sql"))
+            or re.search(r"(?<![a-z0-9])db(?![a-z0-9])", lowered)
+        ):
+            return "db"
         return None
 
     def _extract_web_workflow(self, text: str) -> str | None:

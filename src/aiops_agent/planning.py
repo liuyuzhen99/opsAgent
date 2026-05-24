@@ -53,6 +53,48 @@ class PlanningService:
                 success_criteria=["返回巡检结果", "输出异常列表或确认系统健康"],
             )
 
+        if intent == "rpa_action":
+            task_matches = session_memory.get("task_matches") if isinstance(session_memory, dict) else []
+            matched_target = ""
+            matched_capability = ""
+            if isinstance(task_matches, list):
+                for match in task_matches:
+                    if not isinstance(match, dict):
+                        continue
+                    if match.get("intent") and match.get("intent") != "rpa_action":
+                        continue
+                    matched_target = str(match.get("target") or "")
+                    matched_capability = str(match.get("capability") or "")
+                    if matched_target or matched_capability:
+                        break
+            capability = str(entities.get("capability") or matched_capability or "ssh")
+            params = {
+                "target": entities.get("target") or matched_target or None,
+                "capability": capability,
+                "operation": entities.get("operation") or "login",
+                "raw_text": entities.get("raw_text", task_input),
+            }
+            return ExecutionPlan(
+                goal="启动目标系统的登录类 RPA 应用",
+                steps=[
+                    "解析 RPA 登录目标与客户端类型",
+                    "调用 rpa_action 工具启动对应登录 RPA",
+                    "返回启动状态和操作日志",
+                ],
+                selected_tools=["rpa_action"],
+                tool_calls=[
+                    ToolCallSpec(
+                        tool_name="rpa_action",
+                        action="login",
+                        params=params,
+                        risk_level="controlled_rpa_login",
+                    )
+                ],
+                risk_level="controlled_rpa_login",
+                confirmation_required=False,
+                success_criteria=["启动对应 RPA 登录流程", "返回目标、客户端类型和流程 UUID"],
+            )
+
         if intent == "permission_change":
             return ExecutionPlan(
                 goal="规划权限变更任务并等待人工确认",

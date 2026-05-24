@@ -50,6 +50,8 @@ class ContextCompressor:
                 "created_at": task.created_at,
                 "system": self._safe_text(entities.get("system")),
                 "env": self._safe_text(entities.get("env")),
+                "target": self._safe_text(data.get("target") or entities.get("target")),
+                "capability": self._safe_text(data.get("capability") or entities.get("capability")),
                 "site_key": self._safe_text(entities.get("site_key")),
             },
             "last_observation": {
@@ -132,6 +134,8 @@ class ContextCompressor:
                 status=self._safe_text(task_facts.get("status")),
                 system=self._safe_text(task_facts.get("system")),
                 env=self._safe_text(task_facts.get("env")),
+                target=self._safe_text(task_facts.get("target")),
+                capability=self._safe_text(task_facts.get("capability")),
                 site_key=self._safe_text(task_facts.get("site_key")),
                 url=self._safe_text(observation.get("url")),
                 title=self._safe_text(observation.get("title")),
@@ -309,6 +313,8 @@ class ContextCompressor:
                     "status": entry.status,
                     "system": entry.system,
                     "env": entry.env,
+                    "target": entry.target,
+                    "capability": entry.capability,
                     "site_key": entry.site_key,
                     "url": self._truncate(self._redact_sensitive(entry.url), 240),
                     "title": self._truncate(self._redact_sensitive(entry.title), 120),
@@ -389,6 +395,10 @@ class ContextCompressor:
                 value += 30
             if entry.env and entry.env.lower() in query_lower:
                 value += 20
+            if entry.target and entry.target.lower() in query_lower:
+                value += 40
+            if entry.capability and entry.capability.lower() in query_lower:
+                value += 30
             if entry.site_key and entry.site_key.lower() in query_lower:
                 value += 30
             if intent == "web_action":

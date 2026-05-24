@@ -29,6 +29,53 @@ def test_planning_uses_session_memory_to_fill_inspection_entities():
     assert params["env"] == "prod"
 
 
+def test_planning_builds_rpa_action_login_call():
+    plan = PlanningService().plan(
+        "登录 120.13 ssh",
+        "rpa_action",
+        {
+            "raw_text": "登录 120.13 ssh",
+            "target": "120.13",
+            "capability": "ssh",
+            "operation": "login",
+        },
+    )
+
+    call = plan.tool_calls[0]
+
+    assert call.tool_name == "rpa_action"
+    assert call.action == "login"
+    assert call.risk_level == "controlled_rpa_login"
+    assert call.params["target"] == "120.13"
+    assert call.params["capability"] == "ssh"
+
+
+def test_planning_uses_session_memory_to_fill_rpa_action_target():
+    plan = PlanningService().plan(
+        "再打开这台机器的 sftp",
+        "rpa_action",
+        {
+            "raw_text": "再打开这台机器的 sftp",
+            "capability": "sftp",
+            "session_memory": {
+                "task_matches": [
+                    {
+                        "task_id": "rpa-1",
+                        "intent": "rpa_action",
+                        "target": "120.13",
+                        "capability": "ssh",
+                    }
+                ]
+            },
+        },
+    )
+
+    params = plan.tool_calls[0].params
+
+    assert params["target"] == "120.13"
+    assert params["capability"] == "sftp"
+
+
 def test_planning_uses_session_memory_for_web_resume_params():
     plan = PlanningService().plan(
         "继续查 bob",

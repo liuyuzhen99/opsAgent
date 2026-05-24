@@ -29,6 +29,26 @@ class InspectionConfig:
 
 
 @dataclass(slots=True)
+class RPATargetConfig:
+    ssh: str = ""
+    sftp: str = ""
+    db: str = ""
+
+    def flow_for(self, capability: str) -> str:
+        normalized = capability.strip().lower()
+        if normalized in {"database", "sql", "plsql", "pl/sql"}:
+            normalized = "db"
+        if normalized not in {"ssh", "sftp", "db"}:
+            return ""
+        return getattr(self, normalized)
+
+
+@dataclass(slots=True)
+class RPAActionsConfig:
+    targets: dict[str, RPATargetConfig] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class ShadowBotConfig:
     executable_path: str = ""
     robot_uuid: str = ""
@@ -74,6 +94,7 @@ class RPAConfig:
     timeout_seconds: int = 10
     auth: AuthConfig = field(default_factory=AuthConfig)
     inspection: InspectionConfig = field(default_factory=InspectionConfig)
+    rpa_actions: RPAActionsConfig = field(default_factory=RPAActionsConfig)
     shadowbot: ShadowBotConfig = field(default_factory=ShadowBotConfig)
     knowledge: KnowledgeConfig = field(default_factory=KnowledgeConfig)
 
@@ -168,6 +189,7 @@ def load_rpa_config(config_path: str | None = None) -> RPAConfig:
 
     auth = raw.get("auth", {})
     inspection = raw.get("inspection", {})
+    rpa_actions = raw.get("rpa_actions", {})
     shadowbot = raw.get("shadowbot", {})
     knowledge = raw.get("knowledge", {})
     return RPAConfig(
@@ -183,6 +205,9 @@ def load_rpa_config(config_path: str | None = None) -> RPAConfig:
             default_system=inspection.get("default_system", "WebLogic"),
             default_env=inspection.get("default_env", "prod"),
             flow_map=dict(inspection.get("flow_map", {})),
+        ),
+        rpa_actions=RPAActionsConfig(
+            targets=_load_rpa_action_targets(rpa_actions.get("targets", {})),
         ),
         shadowbot=ShadowBotConfig(
             executable_path=shadowbot.get("executable_path", ""),
@@ -225,6 +250,21 @@ def load_rpa_config(config_path: str | None = None) -> RPAConfig:
             ),
         ),
     )
+
+
+def _load_rpa_action_targets(raw_targets: Any) -> dict[str, RPATargetConfig]:
+    if not isinstance(raw_targets, dict):
+        return {}
+    targets: dict[str, RPATargetConfig] = {}
+    for target, raw_value in raw_targets.items():
+        if not isinstance(raw_value, dict):
+            continue
+        targets[str(target)] = RPATargetConfig(
+            ssh=str(raw_value.get("ssh", "") or ""),
+            sftp=str(raw_value.get("sftp", "") or ""),
+            db=str(raw_value.get("db", "") or raw_value.get("database", "") or ""),
+        )
+    return targets
 
 
 def load_anthropic_config(config_path: str | None = None) -> LLMProviderConfig:
