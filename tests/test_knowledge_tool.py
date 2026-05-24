@@ -197,6 +197,8 @@ last_updated: 2026-05-12
         assert doc.metadata["severity"] == "P2"
         assert doc.metadata["component"] == "icip"
         assert doc.metadata["outlinks_text"] == "财司系统 - 系统信息 财司系统 - 服务的启停 服务启停"
+        assert "相关标题：财司系统 - 支付指令状态未知" in doc.page_content
+        assert "相关路径：incident.md incident" in doc.page_content
         assert "相关别名：支付指令状态未知 付款状态未知" in doc.page_content
         assert "相关链接：财司系统 - 系统信息 财司系统 - 服务的启停 服务启停" in doc.page_content
         assert "支付截图.png" not in doc.metadata["outlinks_text"]
@@ -240,6 +242,15 @@ title: 错误格式标题
 # ---------------------------------------------------------------------------
 
 class TestKnowledgeRetriever:
+    def test_tokenize_chinese_query_uses_searchable_ngrams(self):
+        from aiops_agent.knowledge.tokenizer import tokenize_knowledge_text
+
+        tokens = tokenize_knowledge_text("财司系统怎么发版")
+
+        assert "财司" in tokens
+        assert "系统" in tokens
+        assert "发版" in tokens
+
     def test_retrieve_keyword_returns_relevant_docs(self, knowledge_config: KnowledgeConfig, llm_config: LLMProviderConfig):
         from aiops_agent.knowledge.retriever import KnowledgeRetriever
         indexer = VaultIndexer(knowledge_config)
@@ -248,6 +259,44 @@ class TestKnowledgeRetriever:
         results = retriever.retrieve_keyword("WebLogic OOM 如何处理", bm25, docs)
         assert len(results) >= 1
         assert any("OOM" in d.page_content or "WebLogic" in d.page_content for d in results)
+
+    def test_retrieve_keyword_matches_chinese_question_against_title_context(
+        self,
+        tmp_path: Path,
+        llm_config: LLMProviderConfig,
+    ):
+        from aiops_agent.knowledge.retriever import KnowledgeRetriever
+
+        for index in range(20):
+            (tmp_path / f"a{index:02d}.md").write_text(
+                f"# 无关文档 {index}\n\n这是普通巡检记录。",
+                encoding="utf-8",
+            )
+        runbooks = tmp_path / "runbooks"
+        runbooks.mkdir()
+        (runbooks / "财司系统 - 生产环境发版.md").write_text("""\
+---
+title: 财司系统生产环境发版
+aliases:
+  - 财司发版
+system: 财司系统
+type: runbooks
+env: prod
+---
+# 步骤
+
+## 步骤1：接收补丁
+收到发版补丁包。
+""", encoding="utf-8")
+        config = KnowledgeConfig(vault_path=str(tmp_path), index_mode="keyword")
+        indexer = VaultIndexer(config)
+        bm25, docs = indexer.build_keyword()
+        retriever = KnowledgeRetriever(config, llm_config)
+
+        results = retriever.retrieve_keyword("财司系统怎么发版", bm25, docs)
+
+        assert results
+        assert results[0].metadata["rel_path"] == "runbooks/财司系统 - 生产环境发版.md"
 
     def test_synthesize_returns_answer_on_empty_docs(self, knowledge_config: KnowledgeConfig, llm_config: LLMProviderConfig):
         from aiops_agent.knowledge.retriever import KnowledgeRetriever

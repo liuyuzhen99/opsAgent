@@ -43,6 +43,7 @@ src/aiops_agent/knowledge/engine.py
 src/aiops_agent/knowledge/evaluator.py
 src/aiops_agent/knowledge/indexer.py
 src/aiops_agent/knowledge/retriever.py
+src/aiops_agent/knowledge/tokenizer.py
 src/aiops_agent/knowledge/writer.py
 src/aiops_agent/llm/__init__.py
 src/aiops_agent/llm/anthropic_provider.py

@@ -17,12 +17,13 @@ except ImportError:
 from rank_bm25 import BM25Okapi
 
 from aiops_agent.config import KnowledgeConfig
+from aiops_agent.knowledge.tokenizer import tokenize_knowledge_text
 
 
 class VaultIndexer:
     CHUNK_SIZE = 800
     CHUNK_OVERLAP = 100
-    MANIFEST_SCHEMA_VERSION = 2
+    MANIFEST_SCHEMA_VERSION = 3
 
     def __init__(self, config: KnowledgeConfig):
         self.config = config
@@ -200,6 +201,12 @@ class VaultIndexer:
 
     def _append_link_context(self, content: str, metadata: dict) -> str:
         lines: list[str] = []
+        if metadata.get("title"):
+            lines.append(f"相关标题：{metadata['title']}")
+        if metadata.get("rel_path"):
+            rel_path = str(metadata["rel_path"])
+            note_name = Path(rel_path).stem
+            lines.append(f"相关路径：{rel_path} {note_name}")
         if metadata.get("aliases_text"):
             lines.append(f"相关别名：{metadata['aliases_text']}")
         if metadata.get("tags_text"):
@@ -259,7 +266,7 @@ class VaultIndexer:
 
     @staticmethod
     def _tokenize(text: str) -> list[str]:
-        return re.findall(r"\w+", text.lower())
+        return tokenize_knowledge_text(text)
 
     def _write_manifest(self) -> None:
         import json

@@ -12,6 +12,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
 from aiops_agent.config import KnowledgeConfig, LLMProviderConfig
+from aiops_agent.knowledge.tokenizer import tokenize_knowledge_text
 
 from aiops_agent.tools.knowledge import KnowledgeAnswer, KnowledgeSource
 
@@ -30,7 +31,7 @@ class KnowledgeRetriever:
     def retrieve_keyword(self, question: str, bm25, docs: list[Document]) -> list[Document]:
         if not docs:
             return []
-        tokens = re.findall(r"\w+", question.lower())
+        tokens = tokenize_knowledge_text(question)
         if not tokens:
             return self._prefer_concrete_docs(docs[: self.RETRIEVAL_CANDIDATES])[: self.TOP_K]
         scores = bm25.get_scores(tokens)
