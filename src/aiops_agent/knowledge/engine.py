@@ -43,6 +43,7 @@ class KnowledgeEngine:
             bm25, bm25_docs = self._get_bm25()
             docs = self._retriever.retrieve_keyword(rewritten, bm25, bm25_docs)
 
+        docs = self._expand_graph_context(rewritten, docs)
         answer = self._retriever.synthesize_with_history(rewritten, docs, history)
 
         if self.config.enable_eval and docs:
@@ -127,6 +128,12 @@ class KnowledgeEngine:
         bm25, bm25_docs = self._get_bm25()
         vector_db = self._get_vector_db()
         return bm25, bm25_docs, vector_db
+
+    def _expand_graph_context(self, question: str, docs):
+        linked_docs = self._indexer.expand_outlinks(docs)
+        if not linked_docs:
+            return docs
+        return self._retriever.merge_graph_results(question, docs, linked_docs)
 
     def _retrieve_hybrid_with_retry(self, question: str, bm25, bm25_docs):
         return self._run_vector_operation_with_retries(

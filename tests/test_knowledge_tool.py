@@ -197,11 +197,34 @@ last_updated: 2026-05-12
         assert doc.metadata["severity"] == "P2"
         assert doc.metadata["component"] == "icip"
         assert doc.metadata["outlinks_text"] == "财司系统 - 系统信息 财司系统 - 服务的启停 服务启停"
+        assert doc.metadata["outlink_targets"] == "财司系统 - 系统信息\n财司系统 - 服务的启停"
         assert "相关标题：财司系统 - 支付指令状态未知" in doc.page_content
         assert "相关路径：incident.md incident" in doc.page_content
         assert "相关别名：支付指令状态未知 付款状态未知" in doc.page_content
         assert "相关链接：财司系统 - 系统信息 财司系统 - 服务的启停 服务启停" in doc.page_content
         assert "支付截图.png" not in doc.metadata["outlinks_text"]
+
+    def test_expand_outlinks_resolves_existing_note_and_records_relation(self, tmp_path: Path):
+        runbooks = tmp_path / "runbooks"
+        runbooks.mkdir()
+        (runbooks / "财司系统 - weblogic部署手册.md").write_text(
+            "# 部署手册\n\n## 相关知识\n- [[财司系统 - 生产环境发版]]：财司系统发版步骤\n",
+            encoding="utf-8",
+        )
+        (runbooks / "财司系统 - 生产环境发版.md").write_text(
+            "---\ntitle: 财司系统生产环境发版\n---\n\n# 步骤\n收到发版补丁包。",
+            encoding="utf-8",
+        )
+        indexer = VaultIndexer(KnowledgeConfig(vault_path=str(tmp_path)))
+        docs = indexer.iter_docs()
+        parent = next(doc for doc in docs if "weblogic部署手册" in doc.metadata["rel_path"])
+
+        expanded = indexer.expand_outlinks([parent])
+
+        assert len(expanded) == 1
+        assert expanded[0].metadata["rel_path"] == "runbooks/财司系统 - 生产环境发版.md"
+        assert expanded[0].metadata["relation"] == "outlink"
+        assert expanded[0].metadata["related_to"] == "财司系统 - weblogic部署手册"
 
     def test_fenced_frontmatter_is_marked_but_not_parsed_as_contract(self, tmp_path: Path):
         note = """\
@@ -426,6 +449,53 @@ ORDER BY b.send_time, b.AMOUNT DESC;
         assert "必须完整保留相关代码块" in captured_messages[0]
         assert len(answer.sources) == 1
         assert answer.sources[0].section == "runbooks/财司系统 - 对私付款表周报导出.md"
+
+    def test_engine_query_uses_relevant_wikilink_target_as_source(
+        self,
+        tmp_path: Path,
+        llm_config: LLMProviderConfig,
+    ):
+        from langchain_core.messages import AIMessage
+        from langchain_core.runnables import RunnableLambda
+        from aiops_agent.knowledge.engine import KnowledgeEngine
+
+        runbooks = tmp_path / "runbooks"
+        runbooks.mkdir()
+        (runbooks / "财司系统 - weblogic部署手册.md").write_text(
+            "# WebLogic安装手册\n\n# 相关知识\n- [[财司系统 - 生产环境发版]]：财司系统发版步骤\n",
+            encoding="utf-8",
+        )
+        (runbooks / "财司系统 - 生产环境发版.md").write_text("""\
+---
+title: 财司系统生产环境发版
+aliases:
+  - 财司发版
+---
+# 步骤
+## 步骤1：接收补丁
+收到发版补丁包。
+""", encoding="utf-8")
+        config = KnowledgeConfig(vault_path=str(tmp_path), index_mode="keyword")
+        engine = KnowledgeEngine(config, llm_config)
+        _, chunks = engine._indexer.build_keyword()
+        parent = next(doc for doc in chunks if "weblogic部署手册" in doc.metadata["rel_path"])
+        captured_messages: list[str] = []
+
+        def fake_invoke(prompt_value):
+            captured_messages.append("\n".join(str(message.content) for message in prompt_value.messages))
+            return AIMessage(content="请按发版步骤执行。")
+
+        with (
+            patch.object(engine._retriever, "retrieve_keyword", return_value=[parent]),
+            patch.object(engine._retriever, "_build_synthesis_model", return_value=RunnableLambda(fake_invoke)),
+        ):
+            answer = engine.query("财司系统怎么发版")
+
+        assert captured_messages
+        assert "收到发版补丁包" in captured_messages[0]
+        assert answer.sources[0].section == "runbooks/财司系统 - 生产环境发版.md"
+        assert answer.sources[0].relation == "outlink"
+        assert answer.sources[0].related_to == "财司系统 - weblogic部署手册"
 
     def test_rrf_merge_deduplicates_by_chunk_key(self, knowledge_config: KnowledgeConfig, llm_config: LLMProviderConfig):
         from langchain_core.documents import Document
@@ -654,6 +724,9 @@ class TestKnowledgeEngineVectorLifecycle:
             def is_vector_stale(self):
                 return False
 
+            def expand_outlinks(self, docs):
+                return []
+
         class FakeRetriever:
             def __init__(self):
                 self.hybrid_calls = 0
@@ -753,6 +826,50 @@ class TestKnowledgeWriteTool:
         assert "- [[WebLogic - OOM 处理步骤]]：WebLogic OOM 的处理步骤" in moc_path.read_text(encoding="utf-8")
         assert data["reindex_status"] == "cache_refreshed"
         assert engine.reindex_count == 1
+
+    def test_writer_automatically_adds_relevant_existing_note_link(
+        self,
+        knowledge_config: KnowledgeConfig,
+        llm_config: LLMProviderConfig,
+    ):
+        runbooks = Path(knowledge_config.vault_path) / "runbooks"
+        (runbooks / "财司系统 - 服务的启停.md").write_text("""\
+---
+title: 财司系统服务的启停
+aliases:
+  - 财司服务启停
+---
+# 服务启动与停止
+财司系统发版时按照服务启停顺序执行。
+""", encoding="utf-8")
+        (runbooks / "Runbooks MOC.md").write_text(
+            "- [[财司系统 - 服务的启停]]：财司系统发版时的服务启停顺序\n",
+            encoding="utf-8",
+        )
+
+        def release_draft(self, instruction, history, *, default_system=None, default_env=None):
+            return {
+                "title": "生产环境发版补充检查",
+                "aliases": ["发版检查"],
+                "system": "财司系统",
+                "type": "runbooks",
+                "env": "prod",
+                "severity": "P2",
+                "tags": ["system/财司系统", "type/runbook"],
+                "summary": "财司系统生产发版时核对服务启停顺序",
+                "body": "## 处理步骤\n\n财司系统生产发版前后需要确认服务停止和启动顺序。",
+                "related_links": [],
+            }
+
+        tool = KnowledgeWriteTool(knowledge_config, llm_config=llm_config, engine=FakeKnowledgeEngine())
+        with patch.object(KnowledgeNoteWriter, "_draft_with_llm", release_draft):
+            result = tool.execute({"instruction": "写入知识库：财司系统生产环境发版时需要核对服务启停顺序"})
+
+        assert result.success is True
+        assert "财司系统 - 服务的启停" in result.data["updated_links"]
+        raw = Path(result.data["note_path"]).read_text(encoding="utf-8")
+        assert "[[财司系统 - 服务的启停]]" in raw
+        assert "[[Runbooks MOC]]" not in raw
 
     def test_writer_preserves_fenced_sql_when_llm_omits_it(
         self,

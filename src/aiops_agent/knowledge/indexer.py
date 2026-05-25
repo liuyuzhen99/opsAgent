@@ -23,7 +23,7 @@ from aiops_agent.knowledge.tokenizer import tokenize_knowledge_text
 class VaultIndexer:
     CHUNK_SIZE = 800
     CHUNK_OVERLAP = 100
-    MANIFEST_SCHEMA_VERSION = 3
+    MANIFEST_SCHEMA_VERSION = 4
 
     def __init__(self, config: KnowledgeConfig):
         self.config = config
@@ -62,6 +62,39 @@ class VaultIndexer:
             return BM25Okapi([[""]]), chunks
         tokenized = [self._tokenize(doc.page_content) for doc in chunks]
         return BM25Okapi(tokenized), chunks
+
+    def expand_outlinks(self, docs: list[Document]) -> list[Document]:
+        """Resolve existing vault notes linked by directly retrieved documents."""
+        if not self.config.obsidian_graph_enabled or self.config.graph_expand_depth <= 0:
+            return []
+
+        note_lookup = self._build_note_lookup(self.iter_docs())
+        seen_sources = {str(doc.metadata.get("source", "")) for doc in docs}
+        expanded: list[Document] = []
+        frontier = docs
+        for _ in range(self.config.graph_expand_depth):
+            next_frontier: list[Document] = []
+            for parent in frontier:
+                related_to = str(parent.metadata.get("title", parent.metadata.get("rel_path", "")))
+                targets = str(parent.metadata.get("outlink_targets", "")).splitlines()
+                for target in targets:
+                    linked = note_lookup.get(self._normalize_link_target(target))
+                    if linked is None:
+                        continue
+                    source = str(linked.metadata.get("source", ""))
+                    if source in seen_sources:
+                        continue
+                    seen_sources.add(source)
+                    metadata = dict(linked.metadata)
+                    metadata["relation"] = "outlink"
+                    metadata["related_to"] = related_to
+                    resolved = Document(page_content=linked.page_content, metadata=metadata)
+                    expanded.append(resolved)
+                    next_frontier.append(resolved)
+            frontier = next_frontier
+            if not frontier:
+                break
+        return expanded
 
     def build_vector(self):
         """Build Chroma vector index persisted to vault/.chroma."""
@@ -165,6 +198,7 @@ class VaultIndexer:
         outlinks = self._parse_wikilinks(content) if self.config.obsidian_graph_enabled else []
         if outlinks:
             metadata["outlinks_text"] = " ".join(outlinks)
+            metadata["outlink_targets"] = "\n".join(self._parse_wikilink_targets(content))
         if self._is_moc(rel_path):
             metadata["is_moc"] = True
 
@@ -230,6 +264,27 @@ class VaultIndexer:
     def _is_moc(self, rel_path: str) -> bool:
         return any(fnmatch.fnmatch(rel_path, pattern) for pattern in self.config.moc_patterns)
 
+    def _build_note_lookup(self, docs: list[Document]) -> dict[str, Document]:
+        lookup: dict[str, Document] = {}
+        for doc in docs:
+            rel_path = str(doc.metadata.get("rel_path", ""))
+            keys = [
+                re.sub(r"\.md$", "", rel_path, flags=re.IGNORECASE),
+                Path(rel_path).stem,
+                str(doc.metadata.get("title", "")),
+            ]
+            for key in keys:
+                normalized = self._normalize_link_target(key)
+                if normalized:
+                    lookup.setdefault(normalized, doc)
+        return lookup
+
+    @staticmethod
+    def _normalize_link_target(target: str) -> str:
+        normalized = target.strip().replace("\\", "/").split("#", 1)[0].strip()
+        normalized = re.sub(r"\.md$", "", normalized, flags=re.IGNORECASE)
+        return normalized.casefold()
+
     @staticmethod
     def _parse_wikilinks(content: str) -> list[str]:
         links: list[str] = []
@@ -247,6 +302,17 @@ class VaultIndexer:
             if alias:
                 links.append(alias)
         return links
+
+    @staticmethod
+    def _parse_wikilink_targets(content: str) -> list[str]:
+        targets: list[str] = []
+        for match in re.finditer(r"(!?)\[\[([^\]]+)\]\]", content):
+            if match.group(1):
+                continue
+            target = match.group(2).partition("|")[0].strip()
+            if target and target not in targets:
+                targets.append(target)
+        return targets
 
     @staticmethod
     def _metadata_scalar(value):
