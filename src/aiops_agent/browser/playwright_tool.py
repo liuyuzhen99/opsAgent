@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import re
 from dataclasses import asdict
 from pathlib import Path
 from urllib.parse import urlparse
@@ -141,7 +142,10 @@ class PlaywrightBrowserTool:
             if action.type == "click":
                 self._click_with_popup_fallback(page, action, locator)
             elif action.type == "type":
-                locator.fill(action.value or "", timeout=action.timeout_ms)
+                if self._is_date_type_action(action):
+                    self._set_date_field(page, action, locator)
+                else:
+                    locator.fill(action.value or "", timeout=action.timeout_ms)
             elif action.type == "select":
                 locator.select_option(action.value or "", timeout=action.timeout_ms)
             elif action.type == "press":
@@ -247,9 +251,15 @@ class PlaywrightBrowserTool:
             if command_locator is not None:
                 return command_locator
         if action.target_id:
-            return self._first_usable_locator(
-                *[frame.locator(f"[data-aiops-id='{action.target_id}']") for frame in page.frames]
+            target_locator = self._first_existing_usable_locator(
+                *[
+                    locator
+                    for frame in page.frames
+                    for locator in self._target_id_locators(frame, action.target_id)
+                ]
             )
+            if target_locator is not None:
+                return target_locator
         if action.type == "type" and (hint == "__password__" or hint in {"密码", "password", "Password"}):
             return self._first_usable_locator(
                 *[
@@ -297,6 +307,9 @@ class PlaywrightBrowserTool:
         if hint.startswith("xpath="):
             return self._first_usable_locator(*[frame.locator(hint) for frame in page.frames])
         if action.type == "click":
+            date_locator = self._date_click_locator(page, action)
+            if date_locator is not None:
+                return date_locator
             popup_locator = self._popup_click_locator(page, action)
             if popup_locator is not None:
                 return popup_locator
@@ -312,6 +325,149 @@ class PlaywrightBrowserTool:
         exact_text = [frame.get_by_text(hint, exact=True) for frame in page.frames]
         fallback_text = [frame.get_by_text(hint) for frame in page.frames]
         return self._first_usable_locator(*exact_text, *fallback_text)
+
+    def _target_id_locators(self, frame, target_id: str):
+        escaped = self._css_attr_value(target_id)
+        return [
+            frame.locator(f"[data-aiops-id=\"{escaped}\"]"),
+            frame.locator(f"[id=\"{escaped}\"]"),
+            frame.locator(f"[name=\"{escaped}\"]"),
+            frame.locator(f"[aria-label=\"{escaped}\"]"),
+        ]
+
+    def _css_attr_value(self, value: str) -> str:
+        return value.replace("\\", "\\\\").replace('"', '\\"')
+
+    def _is_date_type_action(self, action: BrowserAction) -> bool:
+        value = (action.value or "").strip()
+        if not re.fullmatch(r"\d{4}-\d{1,2}-\d{1,2}", value):
+            return False
+        searchable = " ".join(item for item in (action.target_hint, action.target_id or "", action.expected_outcome) if item).lower()
+        return any(token in searchable for token in ("date", "日期", "时间"))
+
+    def _date_click_locator(self, page, action: BrowserAction):
+        hint_text = " ".join(item for item in (action.target_hint, action.expected_outcome) if item)
+        if not any(token in hint_text.lower() for token in ("date", "日期", "时间")):
+            return None
+        prefer_end = any(token in hint_text for token in ("结束", "截止", "至", "end", "End"))
+        locators = []
+        for frame in page.frames:
+            preferred = self._date_input_selectors(prefer_end=prefer_end)
+            fallback = self._date_input_selectors(prefer_end=not prefer_end)
+            locators.extend(frame.locator(selector) for selector in preferred + fallback)
+        return self._first_existing_usable_locator(*locators)
+
+    def _date_input_selectors(self, *, prefer_end: bool) -> list[str]:
+        specific = (
+            [
+                "input[name*='End' i]",
+                "input[id*='End' i]",
+                "input[name*='To' i]",
+                "input[id*='To' i]",
+            ]
+            if prefer_end
+            else [
+                "input[name*='Start' i]",
+                "input[id*='Start' i]",
+                "input[name*='Begin' i]",
+                "input[id*='Begin' i]",
+                "input[name*='From' i]",
+                "input[id*='From' i]",
+            ]
+        )
+        return [
+            *specific,
+            "input[name*='date' i]:not([type='hidden'])",
+            "input[id*='date' i]:not([type='hidden'])",
+            "input[placeholder*='yyyy' i]:not([type='hidden'])",
+        ]
+
+    def _set_date_field(self, page, action: BrowserAction, locator) -> None:
+        value = (action.value or "").strip()
+        if self._locator_value_equals(locator, value):
+            return
+        try:
+            locator.click(timeout=action.timeout_ms)
+        except Exception:
+            pass
+        if self._select_visible_calendar_date(page, value, action.timeout_ms):
+            return
+        try:
+            locator.fill(value, timeout=action.timeout_ms)
+            self._dispatch_input_events(locator)
+            return
+        except Exception as fill_error:
+            try:
+                locator.evaluate(
+                    """
+                    (el, value) => {
+                      const oldReadonly = el.getAttribute('readonly');
+                      const oldDisabled = el.getAttribute('disabled');
+                      el.removeAttribute('readonly');
+                      el.removeAttribute('disabled');
+                      el.focus();
+                      const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+                      const descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
+                      if (descriptor && descriptor.set) {
+                        descriptor.set.call(el, value);
+                      } else {
+                        el.value = value;
+                      }
+                      el.dispatchEvent(new Event('input', { bubbles: true }));
+                      el.dispatchEvent(new Event('change', { bubbles: true }));
+                      el.blur();
+                      el.dispatchEvent(new Event('blur', { bubbles: true }));
+                      if (oldReadonly !== null) el.setAttribute('readonly', oldReadonly);
+                      if (oldDisabled !== null) el.setAttribute('disabled', oldDisabled);
+                    }
+                    """,
+                    value,
+                )
+                return
+            except Exception:
+                raise fill_error
+
+    def _locator_value_equals(self, locator, value: str) -> bool:
+        try:
+            return str(locator.input_value()).strip() == value
+        except Exception:
+            return False
+
+    def _dispatch_input_events(self, locator) -> None:
+        try:
+            locator.evaluate(
+                """
+                (el) => {
+                  el.dispatchEvent(new Event('input', { bubbles: true }));
+                  el.dispatchEvent(new Event('change', { bubbles: true }));
+                  el.blur();
+                  el.dispatchEvent(new Event('blur', { bubbles: true }));
+                }
+                """
+            )
+        except Exception:
+            pass
+
+    def _select_visible_calendar_date(self, page, value: str, timeout_ms: int) -> bool:
+        day_text = str(int(value.rsplit("-", 1)[1]))
+        locators = []
+        for frame in page.frames:
+            for popup in self._date_popup_selectors():
+                popup_locator = frame.locator(f"{popup}:visible")
+                locators.extend(
+                    [
+                        popup_locator.get_by_text(value, exact=True),
+                        popup_locator.get_by_text(day_text, exact=True),
+                    ]
+                )
+        option = self._first_existing_usable_locator(*locators)
+        if option is None:
+            return False
+        try:
+            option.click(timeout=timeout_ms)
+        except Exception:
+            return False
+        return True
 
     def _locator_has_candidates(self, locator) -> bool:
         try:
@@ -490,6 +646,20 @@ class PlaywrightBrowserTool:
             ".el-select-dropdown",
             ".ant-select-dropdown",
             ".layui-layer",
+        ]
+
+    def _date_popup_selectors(self) -> list[str]:
+        return [
+            ".WdateDiv",
+            "#_my97DP",
+            ".ui-datepicker",
+            ".datepicker",
+            ".date-picker",
+            ".calendar",
+            "[class*='datepicker']",
+            "[class*='date-picker']",
+            "[class*='calendar']",
+            *self._popup_selectors(),
         ]
 
     def _means_first_result(self, hint: str) -> bool:

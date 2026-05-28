@@ -37,6 +37,7 @@ from aiops_agent.tools.registry import ToolRegistry
 
 DEFAULT_BROWSER_MAX_STEPS = 40
 DEFAULT_BROWSER_SLOW_MO_MS = 300
+DEFAULT_CHAT_BROWSER_SLOW_MO_MS = 800
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -138,6 +139,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Force manual confirmation before execution",
     )
     chat_parser = subparsers.add_parser("chat", help="Start an interactive Agent chat session")
+    chat_parser.set_defaults(headed=True)
     chat_parser.add_argument("--config", dest="config_path", help="Optional RPA config file path")
     chat_parser.add_argument("--llm-config", dest="llm_config_path", help="Optional LLM config file path")
     chat_parser.add_argument("--credential-config", dest="credential_config_path", help="Optional local browser credential config file path")
@@ -150,6 +152,7 @@ def build_parser() -> argparse.ArgumentParser:
     chat_parser.add_argument("--max-steps", dest="max_steps", type=int, default=DEFAULT_BROWSER_MAX_STEPS, help="Execution step budget")
     chat_parser.add_argument("--allowed-domains", dest="allowed_domains", help="Comma-separated domain allowlist for browser tasks")
     chat_parser.add_argument("--headed", dest="headed", action="store_true", help="Run browser tasks with a visible browser window")
+    chat_parser.add_argument("--headless", dest="headed", action="store_false", help="Run browser tasks without a visible browser window")
     chat_parser.add_argument("--browser-trace", dest="browser_trace", action="store_true", help="Save Playwright trace for browser tasks")
     chat_parser.add_argument("--browser-video", dest="browser_video", action="store_true", help="Save Playwright video for browser tasks")
     chat_parser.add_argument(
@@ -163,7 +166,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--browser-slow-mo",
         dest="browser_slow_mo_ms",
         type=int,
-        default=DEFAULT_BROWSER_SLOW_MO_MS,
+        default=DEFAULT_CHAT_BROWSER_SLOW_MO_MS,
         help="Slow down Playwright browser actions by this many milliseconds",
     )
     chat_parser.add_argument(

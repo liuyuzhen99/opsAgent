@@ -76,6 +76,27 @@ def test_command_hints_are_recognized_for_semantic_lookup(tmp_path):
     assert tool._is_command_hint("授权单位") is False
 
 
+def test_playwright_tool_recognizes_date_type_actions(tmp_path):
+    tool = PlaywrightBrowserTool(
+        session_id="session",
+        task_id="task",
+        artifact_root=tmp_path,
+        headless=True,
+    )
+
+    assert tool._is_date_type_action(
+        BrowserAction(
+            type="type",
+            target_hint="指令创建日期： * 至： *",
+            target_id="transCreateDateStart",
+            value="2026-05-13",
+        )
+    ) is True
+    assert tool._is_date_type_action(
+        BrowserAction(type="type", target_hint="用户名", value="2026-05-13")
+    ) is False
+
+
 def test_playwright_tool_observes_and_interacts_with_iframe_elements(tmp_path):
     iframe_html = """
       <html>
@@ -181,6 +202,166 @@ def test_playwright_tool_types_into_open_dropdown_search_input(tmp_path):
 
         assert typed.status == "success"
         assert "内蒙古伊家好奶酪有限责任公司" in typed.observation.page_text
+    finally:
+        tool.close()
+
+
+def test_playwright_tool_sets_readonly_datepicker_field_by_dom_name(tmp_path):
+    page_html = """
+      <html>
+        <body>
+          <label>指令创建日期：
+            <input
+              name="transCreateDateStart"
+              placeholder="yyyy-mm-dd"
+              readonly
+              value="2026-05-28"
+              onclick="document.querySelector('.WdateDiv').style.display = 'block'"
+              onchange="document.querySelector('#status').innerText = 'picked ' + this.value"
+            />
+          </label>
+          <div class="WdateDiv" style="display:none">
+            <button onclick="
+              const input = document.querySelector('[name=transCreateDateStart]');
+              input.value = '2026-05-13';
+              input.dispatchEvent(new Event('change', { bubbles: true }));
+              document.querySelector('.WdateDiv').style.display = 'none';
+            ">13</button>
+          </div>
+          <div id="status"></div>
+        </body>
+      </html>
+    """
+    tool = PlaywrightBrowserTool(
+        session_id="session",
+        task_id="task",
+        artifact_root=tmp_path,
+        headless=True,
+    )
+
+    try:
+        try:
+            tool.execute(
+                BrowserAction(
+                    type="open_url",
+                    value=f"data:text/html;charset=utf-8,{quote(page_html)}",
+                )
+            )
+        except Exception as exc:
+            if "BrowserType.launch" in str(exc) and "Permission denied" in str(exc):
+                pytest.skip("Playwright browser launch is blocked by the local macOS sandbox")
+            raise
+
+        result = tool.execute(
+            BrowserAction(
+                type="type",
+                target_hint="指令创建日期： * 至： *",
+                target_id="transCreateDateStart",
+                value="2026-05-13",
+            )
+        )
+
+        assert result.status == "success"
+        assert "picked 2026-05-13" in result.observation.page_text
+    finally:
+        tool.close()
+
+
+def test_playwright_tool_skips_datepicker_when_value_is_already_set(tmp_path):
+    page_html = """
+      <html>
+        <body>
+          <input name="transCreateDateStart" value="2026-05-13" />
+          <input
+            name="transCreateDateEnd"
+            readonly
+            value="2026-05-28"
+            onclick="
+              document.querySelector('[name=transCreateDateStart]').value = '2026-05-28';
+              document.querySelector('#status').innerText = 'calendar opened';
+            "
+          />
+          <div id="status"></div>
+        </body>
+      </html>
+    """
+    tool = PlaywrightBrowserTool(
+        session_id="session",
+        task_id="task",
+        artifact_root=tmp_path,
+        headless=True,
+    )
+
+    try:
+        try:
+            tool.execute(
+                BrowserAction(
+                    type="open_url",
+                    value=f"data:text/html;charset=utf-8,{quote(page_html)}",
+                )
+            )
+        except Exception as exc:
+            if "BrowserType.launch" in str(exc) and "Permission denied" in str(exc):
+                pytest.skip("Playwright browser launch is blocked by the local macOS sandbox")
+            raise
+
+        result = tool.execute(
+            BrowserAction(
+                type="type",
+                target_hint="指令创建日期： * 至： *",
+                target_id="transCreateDateEnd",
+                value="2026-05-28",
+            )
+        )
+
+        assert result.status == "success"
+        assert "calendar opened" not in result.observation.page_text
+        assert "2026-05-13" in result.observation.page_text
+    finally:
+        tool.close()
+
+
+def test_playwright_tool_falls_back_from_invalid_target_id_to_date_field(tmp_path):
+    page_html = """
+      <html>
+        <body>
+          <input name="transCreateDateStart" readonly value="2026-05-28" onclick="document.querySelector('#status').innerText = 'opened start'" />
+          <input name="transCreateDateEnd" readonly value="2026-05-28" onclick="document.querySelector('#status').innerText = 'opened end'" />
+          <div id="status"></div>
+        </body>
+      </html>
+    """
+    tool = PlaywrightBrowserTool(
+        session_id="session",
+        task_id="task",
+        artifact_root=tmp_path,
+        headless=True,
+    )
+
+    try:
+        try:
+            tool.execute(
+                BrowserAction(
+                    type="open_url",
+                    value=f"data:text/html;charset=utf-8,{quote(page_html)}",
+                )
+            )
+        except Exception as exc:
+            if "BrowserType.launch" in str(exc) and "Permission denied" in str(exc):
+                pytest.skip("Playwright browser launch is blocked by the local macOS sandbox")
+            raise
+
+        result = tool.execute(
+            BrowserAction(
+                type="click",
+                target_hint="指令创建日期： * 至： *",
+                target_id="aiops-el-?",
+                expected_outcome="点击开始日期输入框，使其获得焦点，准备选择日期。",
+            )
+        )
+
+        assert result.status == "success"
+        assert "opened start" in result.observation.page_text
     finally:
         tool.close()
 

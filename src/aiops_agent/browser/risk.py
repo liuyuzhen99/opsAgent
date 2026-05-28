@@ -34,6 +34,17 @@ class RiskEvaluator:
             return "safe_local_edit"
         if action.type == "press":
             return "safe_local_edit"
+        if action.type == "click" and self._looks_like_date_field(action):
+            return "safe_local_edit"
+        if action.type in {"type", "select"}:
+            searchable = " ".join(
+                item
+                for item in (action.type, action.value or "", action.expected_outcome)
+                if item
+            ).lower()
+            if any(hint in searchable for hint in UNSAFE_HINTS):
+                return "unsafe_mutation"
+            return "safe_local_edit"
         searchable = " ".join(
             item
             for item in (action.type, action.target_hint, action.value or "", action.expected_outcome)
@@ -41,9 +52,17 @@ class RiskEvaluator:
         ).lower()
         if any(hint in searchable for hint in UNSAFE_HINTS):
             return "unsafe_mutation"
-        if action.type in {"type", "select", "press", "click"}:
+        if action.type in {"press", "click"}:
             return "safe_local_edit"
         return "unknown_risk"
 
     def requires_confirmation(self, action: BrowserAction, observation: BrowserObservation | None = None) -> bool:
         return self.classify(action, observation) in {"unsafe_mutation", "unknown_risk"}
+
+    def _looks_like_date_field(self, action: BrowserAction) -> bool:
+        searchable = " ".join(
+            item
+            for item in (action.target_hint, action.target_id or "", action.expected_outcome)
+            if item
+        ).lower()
+        return any(token in searchable for token in ("日期", "时间", "date"))

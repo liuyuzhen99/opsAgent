@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from aiops_agent.agent.controller import AgentController
 from aiops_agent.agent.parser import IntentParser
+from aiops_agent.llm.base import IntentClassification
 from pydantic import ValidationError
 
 from aiops_agent.browser.llm_planner import BrowserPlannerDecision, BrowserPlannerOutput
@@ -18,6 +19,7 @@ def test_browser_sites_config_loads_and_defaults_allowed_domain(tmp_path):
                 "sites": {
                     "demo": {
                         "site_key": "demo",
+                        "aliases": ["演示系统"],
                         "base_url": "http://example.test",
                         "workflows": {
                             "search_user": {
@@ -42,6 +44,7 @@ def test_browser_sites_config_loads_and_defaults_allowed_domain(tmp_path):
     config = load_browser_sites_config(path)
 
     assert config.get("demo").allowed_domains == ["example.test"]
+    assert config.get("demo").aliases == ["演示系统"]
     assert config.get("demo").workflow_config("search_user").navigation == ["用户管理"]
     assert config.get("demo").workflow_config("create_user").submit_button == "保存"
 
@@ -149,3 +152,111 @@ def test_controller_infers_browser_site_and_credential_from_natural_language():
     assert parsed.entities["start_url"] == "http://ifinance.test/login"
     assert parsed.entities["requires_login"] is True
     assert parsed.entities["allowed_domains"] == ["ifinance.test"]
+
+
+def test_controller_alias_overrides_llm_rpa_for_finance_system_login():
+    class MisclassifyingProvider:
+        def classify_intent(self, text, defaults):
+            return IntentClassification(
+                intent="rpa_action",
+                entities={},
+                provider="fake",
+                model="fake-model",
+                request_id=None,
+            )
+
+    sites = BrowserSitesConfig.model_validate(
+        {
+            "sites": {
+                "ifinance": {
+                    "site_key": "ifinance",
+                    "aliases": ["财司", "财司系统"],
+                    "base_url": "http://ifinance.test",
+                    "login_url": "http://ifinance.test/login",
+                    "allowed_domains": ["ifinance.test"],
+                    "login_fields": {"username": "用户名", "password": "密码", "submit": "登录"},
+                    "workflows": {},
+                }
+            }
+        }
+    )
+    controller = AgentController(
+        parser=IntentParser(llm_provider=MisclassifyingProvider()),
+        task_manager=None,
+        tool_executor=None,
+        summarizer=None,
+        audit_logger=_FakeAuditLogger(),
+        session_store=None,
+        browser_sites_config=sites,
+        credential_ref_resolver=lambda site_key: "ifinance_admin" if site_key == "ifinance" else None,
+    )
+    task = Task(trace_id="trace", input="登录财司系统", id="task", session_id="session")
+
+    state = controller._intent_parse_node(
+        {
+            "task": task,
+            "session": SimpleNamespace(id="session"),
+            "allowed_domains": [],
+            "credential_ref": "",
+            "browser_trace": False,
+            "browser_video": False,
+            "browser_site": "",
+            "browser_channel": "",
+            "browser_slow_mo_ms": 0,
+            "progress_callback": None,
+        }
+    )
+
+    parsed = state["task"]
+    assert parsed.intent == "web_action"
+    assert parsed.entities["site_key"] == "ifinance"
+    assert parsed.entities["credential_ref"] == "ifinance_admin"
+    assert parsed.entities["start_url"] == "http://ifinance.test/login"
+    assert parsed.entities["allowed_domains"] == ["ifinance.test"]
+
+
+def test_controller_alias_does_not_override_explicit_database_rpa():
+    sites = BrowserSitesConfig.model_validate(
+        {
+            "sites": {
+                "ifinance": {
+                    "site_key": "ifinance",
+                    "aliases": ["财司", "财司系统"],
+                    "base_url": "http://ifinance.test",
+                    "login_url": "http://ifinance.test/login",
+                    "allowed_domains": ["ifinance.test"],
+                    "workflows": {},
+                }
+            }
+        }
+    )
+    controller = AgentController(
+        parser=IntentParser(),
+        task_manager=None,
+        tool_executor=None,
+        summarizer=None,
+        audit_logger=_FakeAuditLogger(),
+        session_store=None,
+        browser_sites_config=sites,
+    )
+    task = Task(trace_id="trace", input="登录财司系统数据库", id="task", session_id="session")
+
+    state = controller._intent_parse_node(
+        {
+            "task": task,
+            "session": SimpleNamespace(id="session"),
+            "allowed_domains": [],
+            "credential_ref": "",
+            "browser_trace": False,
+            "browser_video": False,
+            "browser_site": "",
+            "browser_channel": "",
+            "browser_slow_mo_ms": 0,
+            "progress_callback": None,
+        }
+    )
+
+    parsed = state["task"]
+    assert parsed.intent == "rpa_action"
+    assert parsed.entities["capability"] == "db"
+    assert "site_key" not in parsed.entities

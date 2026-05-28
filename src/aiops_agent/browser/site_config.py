@@ -26,6 +26,7 @@ class BrowserWorkflowConfig(BaseModel):
 
 class BrowserSiteConfig(BaseModel):
     site_key: str
+    aliases: list[str] = Field(default_factory=list)
     base_url: str
     login_url: str | None = None
     allowed_domains: list[str] = Field(default_factory=list)

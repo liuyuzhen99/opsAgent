@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
 import sys
@@ -22,7 +23,7 @@ class ChatOptions:
     browser_video: bool = False
     browser_site: str | None = None
     browser_channel: str | None = None
-    browser_slow_mo_ms: int = 300
+    browser_slow_mo_ms: int = 800
 
 
 class ChatRunner:
@@ -183,6 +184,23 @@ class ChatRunner:
         self._print(f"参数: {', '.join(result.inputs) or '-'}")
         self._print(f"动作数: {result.action_count}")
         self._print(f"匹配关键词: {', '.join(result.matched_keywords) or '-'}")
+        decisions = getattr(result, "parameterization_decisions", []) or []
+        variable_decisions = [item for item in decisions if item.get("decision") == "variable"]
+        fixed_decisions = [item for item in decisions if item.get("decision") == "constant"]
+        if variable_decisions:
+            self._print("参数预览:")
+            for item in variable_decisions:
+                self._print(
+                    f"- {item.get('param_name')} {item.get('param_type') or 'text'} "
+                    f"原值={item.get('original_value')}"
+                )
+        if fixed_decisions:
+            self._print("固定值:")
+            for item in fixed_decisions[:10]:
+                self._print(
+                    f"- {item.get('field_hint') or '-'}={item.get('original_value')} "
+                    f"confidence={item.get('confidence')}"
+                )
 
     def _print_progress(self, event: ProgressEvent) -> None:
         self._print(f"[{event.stage}] {event.message}")
@@ -192,8 +210,16 @@ class ChatRunner:
 
     def _read_input(self, prompt: str) -> str:
         if self._prompt_session is not None:
-            return self._prompt_session.prompt(prompt)
+            return self._prompt_session.prompt(prompt, in_thread=self._has_running_event_loop())
         return self.input_func(prompt)
+
+    @staticmethod
+    def _has_running_event_loop() -> bool:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+        return True
 
     def _read_block(self, message: str) -> str:
         self._print(message)

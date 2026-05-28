@@ -37,6 +37,19 @@ def test_parse_rpa_action_login_entities():
     assert default_ssh_result.entities["capability"] == "ssh"
 
 
+def test_parse_explicit_website_login_bypasses_llm_rpa_misclassification():
+    class MisclassifyingProvider:
+        def classify_intent(self, text, defaults):
+            raise AssertionError("explicit website login should bypass LLM")
+
+    parser = IntentParser(llm_provider=MisclassifyingProvider())
+
+    result = parser.parse("登录财司系统网站")
+
+    assert result.intent == "web_action"
+    assert result.entities["requires_login"] is True
+
+
 def test_parse_non_inspection_as_permission_or_qa():
     parser = IntentParser()
 

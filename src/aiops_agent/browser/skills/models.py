@@ -45,3 +45,4 @@ class WebSkillSaveResult:
     inputs: list[str]
     action_count: int
     matched_keywords: list[str]
+    parameterization_decisions: list[dict[str, Any]] = field(default_factory=list)
