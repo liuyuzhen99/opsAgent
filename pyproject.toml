@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "aiops-agent"
 version = "0.1.0"
 description = "AIOps Agent MVP Phase 1"
-readme = "codex.md"
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "anthropic>=0.40.0",
