@@ -9,9 +9,12 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from aiops_agent.config import KnowledgeConfig, LLMProviderConfig
+from aiops_agent.knowledge.indexer import VaultIndexer
+from aiops_agent.knowledge.tokenizer import tokenize_knowledge_text
 
 
 @dataclass(slots=True)
@@ -51,6 +54,8 @@ class KnowledgeWriteResult:
 
 
 class KnowledgeNoteWriter:
+    AUTO_RELATED_LINK_LIMIT = 5
+    AUTO_RELATED_SCORE_RATIO = 0.4
     VALID_TYPES = {"incident", "runbooks", "architecture", "guidance"}
     TYPE_TAGS = {
         "incident": "type/incident",
@@ -115,7 +120,16 @@ class KnowledgeNoteWriter:
             )
 
         moc_path = self._moc_path(target_dir, draft.type)
-        related_links = self._clean_links(draft.related_links, exclude_stems={note_path.stem})
+        auto_related_links = self._discover_related_links(
+            draft,
+            instruction=instruction,
+            history=history,
+            exclude_stems={note_path.stem},
+        )
+        related_links = self._clean_links(
+            [*draft.related_links, *auto_related_links],
+            exclude_stems={note_path.stem},
+        )
         markdown = self._render_markdown(note_title, draft, related_links)
 
         if dry_run:
@@ -498,6 +512,99 @@ class KnowledgeNoteWriter:
             if target not in links:
                 links.append(target)
         return links[:10]
+
+    def _discover_related_links(
+        self,
+        draft: KnowledgeWriteDraft,
+        *,
+        instruction: str,
+        history: list[dict],
+        exclude_stems: set[str] | None = None,
+    ) -> list[str]:
+        if self.vault is None or not self.vault.exists():
+            return []
+
+        indexer = VaultIndexer(self.config)
+        bm25, docs = indexer.build_keyword()
+        if not docs:
+            return []
+        tokens = list(dict.fromkeys(tokenize_knowledge_text(self._related_search_text(draft, instruction, history))))
+        if not tokens:
+            return []
+
+        excluded = {item.casefold() for item in (exclude_stems or set())}
+        ranked = sorted(
+            (
+                (doc, self._related_candidate_score(tokens, doc, float(score)))
+                for doc, score in zip(docs, bm25.get_scores(tokens), strict=False)
+            ),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        candidates: list[tuple[str, float]] = []
+        seen_sources: set[str] = set()
+        for doc, score in ranked:
+            if score <= 0:
+                continue
+            rel_path = str(doc.metadata.get("rel_path", ""))
+            source = str(doc.metadata.get("source", rel_path))
+            note_stem = Path(rel_path).stem
+            if not rel_path or source in seen_sources or self._is_reference_note(rel_path):
+                continue
+            if note_stem.casefold() in excluded:
+                continue
+            seen_sources.add(source)
+            candidates.append((note_stem, float(score)))
+
+        if not candidates:
+            return []
+        min_score = candidates[0][1] * self.AUTO_RELATED_SCORE_RATIO
+        return [
+            target
+            for target, score in candidates
+            if score >= min_score
+        ][: self.AUTO_RELATED_LINK_LIMIT]
+
+    @staticmethod
+    def _related_candidate_score(query_tokens: list[str], doc: Document, bm25_score: float) -> float:
+        query_set = set(query_tokens)
+        title_text = " ".join(
+            str(doc.metadata.get(key, ""))
+            for key in ("title", "aliases_text", "rel_path")
+        )
+        title_overlap = len(query_set.intersection(tokenize_knowledge_text(title_text)))
+        body_overlap = len(query_set.intersection(tokenize_knowledge_text(doc.page_content)))
+        if title_overlap == 0 and body_overlap < 2 and bm25_score <= 0:
+            return 0.0
+        return max(bm25_score, 0.0) + (title_overlap * 2.0) + (body_overlap * 0.1)
+
+    @staticmethod
+    def _related_search_text(
+        draft: KnowledgeWriteDraft,
+        instruction: str,
+        history: list[dict],
+    ) -> str:
+        recent_context = "\n".join(
+            f"{turn.get('question', '')}\n{turn.get('answer', '')}"
+            for turn in history[-3:]
+        )
+        return "\n".join(
+            [
+                draft.system,
+                draft.title,
+                draft.summary,
+                " ".join(draft.aliases),
+                draft.body,
+                instruction,
+                recent_context,
+            ]
+        )
+
+    def _is_reference_note(self, rel_path: str) -> bool:
+        name = Path(rel_path).name
+        if name.lower() == "readme.md" or name.endswith("MOC.md"):
+            return True
+        return any(fnmatch.fnmatch(rel_path, pattern) for pattern in self.config.moc_patterns)
 
     def _link_target_exists(self, target: str) -> bool:
         existing = self._existing_note_link_targets()

@@ -20,6 +20,7 @@ from aiops_agent.tools.knowledge import KnowledgeAnswer, KnowledgeSource
 class KnowledgeRetriever:
     TOP_K = 5
     RETRIEVAL_CANDIDATES = 15
+    GRAPH_SOURCE_LIMIT = 2
     SYNTHESIS_SOURCE_LIMIT = 4
     SYNTHESIS_SOURCE_MAX_CHARS = 12000
     SYNTHESIS_MAX_TOKENS = 4096
@@ -49,6 +50,23 @@ class KnowledgeRetriever:
         kw = self.retrieve_keyword(question, bm25, bm25_docs)
         vec = self.retrieve_vector(question, vector_db)
         return self._prefer_concrete_docs(self._rrf_merge([kw, vec], k=60, limit=self.RETRIEVAL_CANDIDATES))[: self.TOP_K]
+
+    def merge_graph_results(
+        self,
+        question: str,
+        direct_docs: list[Document],
+        linked_docs: list[Document],
+    ) -> list[Document]:
+        if not linked_docs:
+            return direct_docs
+
+        ranked = sorted(
+            linked_docs,
+            key=lambda doc: self._graph_match_score(question, doc),
+            reverse=True,
+        )
+        relevant = [doc for doc in ranked if self._graph_match_score(question, doc) > 0]
+        return relevant[: self.GRAPH_SOURCE_LIMIT] + direct_docs if relevant else direct_docs
 
     def _rrf_merge(self, lists: list[list[Document]], k: int = 60, limit: int | None = None) -> list[Document]:
         scores: dict[str, float] = {}
@@ -144,6 +162,8 @@ class KnowledgeRetriever:
                 path=str(doc.metadata.get("source", "")),
                 section=str(doc.metadata.get("rel_path", "")),
                 matched_text=doc.page_content[:200],
+                relation=str(doc.metadata.get("relation", "direct")),
+                related_to=str(doc.metadata.get("related_to", "")),
             )
             for doc in synthesis_docs
         ]
@@ -201,6 +221,15 @@ class KnowledgeRetriever:
         if name.lower() == "readme.md" or name.endswith("MOC.md"):
             return True
         return any(fnmatch.fnmatch(rel_path, pattern) for pattern in self.config.moc_patterns)
+
+    @staticmethod
+    def _graph_match_score(question: str, doc: Document) -> int:
+        query_tokens = set(tokenize_knowledge_text(question))
+        metadata_text = " ".join(
+            str(doc.metadata.get(key, ""))
+            for key in ("title", "aliases_text", "rel_path")
+        )
+        return len(query_tokens.intersection(tokenize_knowledge_text(metadata_text)))
 
     @staticmethod
     def _strip_frontmatter(raw: str) -> str:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import asdict
 from typing import TypedDict
@@ -10,7 +11,12 @@ from langgraph.graph import END, StateGraph
 from aiops_agent.audit.models import AuditEvent
 from aiops_agent.agent.context import ContextCompressor
 from aiops_agent.agent.progress import ProgressEvent
-from aiops_agent.browser.skills import WebSkillGenerationError, WebSkillGenerator, WebSkillSaveResult
+from aiops_agent.browser.skills import (
+    WebSkillGenerationError,
+    WebSkillGenerator,
+    WebSkillSaveResult,
+    WebSkillValidationError,
+)
 from aiops_agent.support.logging import log_kv
 from aiops_agent.support.trace import get_trace_id
 from aiops_agent.tasks.models import Task, ToolCallSpec, ToolExecutionResult
@@ -405,7 +411,7 @@ class AgentController:
         generator = self.web_skill_generator or WebSkillGenerator()
         try:
             return generator.generate_from_task(task, name=name)
-        except WebSkillGenerationError as exc:
+        except (WebSkillGenerationError, WebSkillValidationError) as exc:
             raise ValueError(str(exc)) from exc
 
     def _build_graph(self):
@@ -447,13 +453,9 @@ class AgentController:
             task.entities["browser_channel"] = state["browser_channel"]
         if state.get("browser_slow_mo_ms"):
             task.entities["browser_slow_mo_ms"] = int(state["browser_slow_mo_ms"])
-        if state.get("browser_site"):
-            site_key = str(state["browser_site"])
+        site_key = str(state["browser_site"]) if state.get("browser_site") else self._browser_site_key_from_text(task.input)
+        if site_key and (state.get("browser_site") or self._should_apply_browser_site(task)):
             self._apply_browser_site(task, site_key)
-        elif task.intent == "web_action" and not task.entities.get("site_key"):
-            site_key = self._browser_site_key_from_text(task.input)
-            if site_key:
-                self._apply_browser_site(task, site_key)
         if task.intent == "web_action" and task.entities.get("site_key") and not task.entities.get("credential_ref"):
             credential_ref = self._default_credential_ref(str(task.entities["site_key"]))
             if credential_ref:
@@ -514,10 +516,34 @@ class AgentController:
 
     def _browser_site_key_from_text(self, text: str) -> str | None:
         lowered = text.lower()
-        for site_key in sorted(self.browser_sites_config.sites):
-            if site_key.lower() in lowered:
+        candidates: list[tuple[str, str]] = []
+        for site_key, site in self.browser_sites_config.sites.items():
+            candidates.append((site_key, site_key))
+            candidates.extend((alias, site_key) for alias in site.aliases)
+        for alias, site_key in sorted(candidates, key=lambda item: len(item[0]), reverse=True):
+            normalized_alias = alias.strip().lower()
+            if normalized_alias and normalized_alias in lowered:
                 return site_key
         return None
+
+    def _should_apply_browser_site(self, task: Task) -> bool:
+        if task.intent == "web_action":
+            return True
+        if task.intent == "general_chat":
+            return self._has_web_navigation_cue(task.input)
+        if task.intent == "rpa_action":
+            return self._has_web_navigation_cue(task.input) and not self._has_explicit_rpa_cue(task.input)
+        return False
+
+    def _has_web_navigation_cue(self, text: str) -> bool:
+        lowered = text.lower()
+        return any(keyword in lowered for keyword in ("登录", "打开", "进入", "访问", "网页", "网站", "浏览器", "login", "open", "visit"))
+
+    def _has_explicit_rpa_cue(self, text: str) -> bool:
+        lowered = text.lower()
+        if re.search(r"(?<![0-9.])\d{2,3}(?:\.\d{1,3}){1,3}(?![0-9.])", text):
+            return True
+        return any(keyword in lowered for keyword in ("ssh", "sftp", "数据库", "pl/sql", "plsql", "sql", "服务器"))
 
     def _default_credential_ref(self, site_key: str) -> str | None:
         if self.credential_ref_resolver is None:

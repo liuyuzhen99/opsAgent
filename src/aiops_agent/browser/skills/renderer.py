@@ -8,13 +8,20 @@ from aiops_agent.browser.skills.models import WebSkillValidationError
 
 
 PARAM_ALIASES = {
+    "start_date": ("开始日期", "起始日期", "开始时间", "起始时间", "from", "start", "start_date"),
+    "end_date": ("结束日期", "截止日期", "结束时间", "截止时间", "to", "end", "end_date"),
     "username": ("用户名", "登录名", "登录名称", "账号", "用户", "user", "username"),
     "company_name": ("公司", "授权单位", "客户名称", "客户", "企业"),
     "role": ("角色", "权限", "岗位", "role", "permission"),
     "department": ("部门", "department"),
     "display_name": ("姓名", "显示名", "display name", "display_name"),
     "email": ("邮箱", "邮件", "email"),
+    "amount": ("金额", "amount"),
+    "batch_no": ("批次号", "网银批次号", "batch", "batch_no"),
+    "account_no": ("账号", "账户号", "银行卡号", "account", "account_no"),
 }
+
+DATE_PATTERN = r"\d{4}[-/]\d{1,2}[-/]\d{1,2}"
 
 
 class WebSkillRenderer:
@@ -22,15 +29,20 @@ class WebSkillRenderer:
         inputs = workflow.get("inputs") or []
         workflow_fields = dict(entities.get("workflow_fields") or {})
         parameters: dict[str, str] = {}
+        date_range = self._date_range_from_goal(goal)
         for item in inputs:
             if not isinstance(item, dict):
                 continue
             name = str(item.get("name") or "").strip()
             if not name:
                 continue
+            param_type = str(item.get("type") or "").strip().lower()
+            aliases = self._aliases_for_input(item, name)
             value = self._value_from_entities(name, workflow_fields)
             if value is None:
-                value = self._value_from_goal(name, goal)
+                value = self._value_from_typed_goal(name, param_type, aliases, goal, date_range)
+            if value is None:
+                value = self._value_from_goal(name, goal, aliases=aliases)
             if value is None:
                 value = self._value_from_examples(item, goal)
             if value is not None:
@@ -76,10 +88,18 @@ class WebSkillRenderer:
             for key in ("permission", "role_name"):
                 if workflow_fields.get(key):
                     return str(workflow_fields[key])
+        if name == "start_date":
+            for key in ("date_start", "start", "from_date"):
+                if workflow_fields.get(key):
+                    return str(workflow_fields[key])
+        if name == "end_date":
+            for key in ("date_end", "end", "to_date"):
+                if workflow_fields.get(key):
+                    return str(workflow_fields[key])
         return None
 
-    def _value_from_goal(self, name: str, goal: str) -> str | None:
-        aliases = PARAM_ALIASES.get(name, (name,))
+    def _value_from_goal(self, name: str, goal: str, *, aliases: tuple[str, ...] | None = None) -> str | None:
+        aliases = aliases or PARAM_ALIASES.get(name, (name,))
         for alias in aliases:
             patterns = (
                 rf"{re.escape(alias)}\s*(?:为|是|叫|:|：)\s*([A-Za-z0-9_.@\-]+|[\u4e00-\u9fffA-Za-z0-9_.@\-]{{2,40}})",
@@ -94,6 +114,53 @@ class WebSkillRenderer:
             if match:
                 return match.group(0)
         return None
+
+    def _value_from_typed_goal(
+        self,
+        name: str,
+        param_type: str,
+        aliases: tuple[str, ...],
+        goal: str,
+        date_range: tuple[str, str] | None,
+    ) -> str | None:
+        if param_type != "date":
+            return None
+        if name == "start_date" and date_range:
+            return date_range[0]
+        if name == "end_date" and date_range:
+            return date_range[1]
+        for alias in aliases:
+            match = re.search(
+                rf"{re.escape(alias)}\s*(?:为|是|叫|:|：|=)?\s*({DATE_PATTERN})",
+                goal,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                return self._normalize_date(match.group(1))
+        return None
+
+    def _aliases_for_input(self, item: dict[str, Any], name: str) -> tuple[str, ...]:
+        aliases = [str(alias) for alias in item.get("aliases") or [] if str(alias).strip()]
+        if aliases:
+            return tuple(dict.fromkeys([*aliases, name]))
+        return PARAM_ALIASES.get(name, (name,))
+
+    def _date_range_from_goal(self, goal: str) -> tuple[str, str] | None:
+        match = re.search(
+            rf"({DATE_PATTERN})\s*(?:到|至|~|－|—|--|-)\s*({DATE_PATTERN})",
+            goal,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return None
+        return self._normalize_date(match.group(1)), self._normalize_date(match.group(2))
+
+    def _normalize_date(self, value: str) -> str:
+        parts = re.split(r"[-/]", value.strip())
+        if len(parts) != 3:
+            return value.strip()
+        year, month, day = parts
+        return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
 
     def _value_from_examples(self, item: dict[str, Any], goal: str) -> str | None:
         for example in item.get("examples") or []:

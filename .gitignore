@@ -2,7 +2,9 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .venv/
-configs/
+configs/*
+configs/llm.json
+configs/rpa.json
 storage/
 src/aiops_agent/__pycache__/
 src/aiops_agent/*.pyc

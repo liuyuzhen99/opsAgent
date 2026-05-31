@@ -99,6 +99,9 @@ class IntentParser:
         explicit_rpa_action = self._parse_explicit_rpa_action(normalized)
         if explicit_rpa_action is not None:
             return explicit_rpa_action
+        explicit_web_action = self._parse_explicit_web_action(normalized)
+        if explicit_web_action is not None:
+            return explicit_web_action
 
         llm_result = self._parse_with_llm(normalized)
         if llm_result is not None:
@@ -152,6 +155,12 @@ class IntentParser:
             },
         )
 
+    def _parse_explicit_web_action(self, normalized: str) -> IntentResult | None:
+        lowered = normalized.lower()
+        if not any(keyword in lowered for keyword in ("网页", "浏览器", "网站", "页面自动化", "http://", "https://")):
+            return None
+        return self._web_action_result(normalized, lowered)
+
     def _parse_with_llm(self, text: str) -> IntentResult | None:
         if self.llm_provider is None:
             return None
@@ -196,39 +205,7 @@ class IntentParser:
             )
 
         if any(keyword in lowered for keyword in self.WEB_ACTION_KEYWORDS + self.WEB_ACCOUNT_KEYWORDS):
-            start_url = self._extract_url(normalized)
-            allowed_domains = []
-            if start_url:
-                host = urlparse(start_url).netloc
-                if host:
-                    allowed_domains.append(host)
-            return IntentResult(
-                intent="web_action",
-                entities={
-                    "raw_text": normalized,
-                    "start_url": start_url,
-                    "allowed_domains": allowed_domains,
-                    "requires_login": any(keyword in lowered for keyword in ("登录", "login", "账号", "password", "密码")),
-                    "has_side_effect": any(
-                        keyword in lowered
-                        for keyword in (
-                            "提交",
-                            "保存",
-                            "删除",
-                            "创建",
-                            "开通",
-                            "授权",
-                            "submit",
-                            "save",
-                            "delete",
-                            "create",
-                            "grant",
-                        )
-                    ),
-                    "workflow": self._extract_web_workflow(normalized),
-                    "workflow_fields": self._extract_workflow_fields(normalized),
-                },
-            )
+            return self._web_action_result(normalized, lowered)
 
         if any(keyword in lowered for keyword in self.PERMISSION_KEYWORDS):
             return IntentResult(
@@ -244,6 +221,41 @@ class IntentParser:
             return IntentResult(intent="general_chat", entities={"raw_text": normalized})
 
         return IntentResult(intent="general_chat", entities={"raw_text": normalized})
+
+    def _web_action_result(self, normalized: str, lowered: str) -> IntentResult:
+        start_url = self._extract_url(normalized)
+        allowed_domains = []
+        if start_url:
+            host = urlparse(start_url).netloc
+            if host:
+                allowed_domains.append(host)
+        return IntentResult(
+            intent="web_action",
+            entities={
+                "raw_text": normalized,
+                "start_url": start_url,
+                "allowed_domains": allowed_domains,
+                "requires_login": any(keyword in lowered for keyword in ("登录", "login", "账号", "password", "密码")),
+                "has_side_effect": any(
+                    keyword in lowered
+                    for keyword in (
+                        "提交",
+                        "保存",
+                        "删除",
+                        "创建",
+                        "开通",
+                        "授权",
+                        "submit",
+                        "save",
+                        "delete",
+                        "create",
+                        "grant",
+                    )
+                ),
+                "workflow": self._extract_web_workflow(normalized),
+                "workflow_fields": self._extract_workflow_fields(normalized),
+            },
+        )
 
     def _extract_url(self, text: str) -> str | None:
         match = re.search(r"https?://[^\s，。；,;]+", text, flags=re.IGNORECASE)

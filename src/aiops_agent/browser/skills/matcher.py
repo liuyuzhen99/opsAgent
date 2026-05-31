@@ -66,7 +66,7 @@ class WebSkillMatcher:
 
         score = min(site_score + keyword_score + field_score + input_score, 1.0)
         if required_inputs and len(required_filled) < len(required_inputs):
-            return WebSkillMatch(skill=skill, score=score, parameters=parameters, actions=[], matched_keywords=matched_keywords)
+            return None
         try:
             actions = self.renderer.render_actions(workflow, parameters, entities)
         except WebSkillValidationError:

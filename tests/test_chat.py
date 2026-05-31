@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from io import StringIO
 from types import SimpleNamespace
 
@@ -124,7 +125,15 @@ def test_chat_parser_uses_web_agent_defaults_without_flags():
 
     assert args.command == "chat"
     assert args.max_steps == 40
-    assert args.browser_slow_mo_ms == 300
+    assert args.headed is True
+    assert args.browser_slow_mo_ms == 800
+
+
+def test_chat_parser_can_opt_back_into_headless_mode():
+    args = build_parser().parse_args(["chat", "--headless"])
+
+    assert args.command == "chat"
+    assert args.headed is False
 
 
 def test_chat_runner_reuses_session_and_prints_progress():
@@ -234,6 +243,26 @@ def test_chat_runner_confirmation_no_does_not_resume():
 
     assert controller.confirm_calls == []
     assert "已跳过确认" in output.getvalue()
+
+
+def test_chat_runner_prompt_session_uses_thread_inside_running_event_loop():
+    calls = []
+
+    class FakePromptSession:
+        def prompt(self, prompt, **kwargs):
+            calls.append((prompt, kwargs))
+            if not kwargs.get("in_thread"):
+                raise RuntimeError("asyncio.run() cannot be called from a running event loop")
+            return "yes"
+
+    runner = ChatRunner(FakeController(), ChatOptions(), output=StringIO())
+    runner._prompt_session = FakePromptSession()
+
+    async def read_input():
+        return runner._read_input("确认继续执行? [y/N] ")
+
+    assert asyncio.run(read_input()) == "yes"
+    assert calls == [("确认继续执行? [y/N] ", {"in_thread": True})]
 
 
 def test_chat_runner_confirmation_yes_resumes():

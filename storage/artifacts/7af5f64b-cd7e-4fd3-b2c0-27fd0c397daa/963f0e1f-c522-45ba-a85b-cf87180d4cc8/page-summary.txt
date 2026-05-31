@@ -1,6 +1,0 @@
-title=Mock Admin - Roles
-url=http://127.0.0.1:8765/users/carol/roles.html
-page_type=interactive
-blocking_reason=
-messages=carol 权限 | 权限分配成功
-elements=角色 | 保存权限
