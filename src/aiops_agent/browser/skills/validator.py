@@ -24,6 +24,10 @@ SECRET_MARKERS = (
     "凭据",
     "密码",
 )
+SUPPORTED_WORKFLOW_SCHEMA_VERSIONS = {
+    "opsagent.web_skill.workflow.v1",
+    "opsagent.web_skill.workflow.v2",
+}
 
 
 def validate_skill_name(name: str) -> str:
@@ -81,13 +85,13 @@ def validate_frontmatter(frontmatter: dict[str, Any], directory_name: str) -> No
 
 
 def validate_workflow(workflow: dict[str, Any], skill_name: str) -> None:
-    if workflow.get("schema_version") != "opsagent.web_skill.workflow.v1":
+    if workflow.get("schema_version") not in SUPPORTED_WORKFLOW_SCHEMA_VERSIONS:
         raise WebSkillValidationError("unsupported workflow schema_version")
     if workflow.get("skill_name") != skill_name:
         raise WebSkillValidationError("workflow skill_name must match SKILL.md name")
-    actions = workflow.get("actions")
+    actions = workflow.get("actions") or workflow.get("steps")
     if not isinstance(actions, list) or not actions:
-        raise WebSkillValidationError("workflow actions must be a non-empty list")
+        raise WebSkillValidationError("workflow actions/steps must be a non-empty list")
     for action in actions:
         if not isinstance(action, dict) or not action.get("type"):
             raise WebSkillValidationError("each workflow action must be an object with type")

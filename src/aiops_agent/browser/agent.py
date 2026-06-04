@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import asdict
 from pathlib import Path
 
 from aiops_agent.audit.models import AuditEvent
+from aiops_agent.browser.action_trace import build_canonical_action_trace
 from aiops_agent.browser.credentials import CredentialError, CredentialStore
 from aiops_agent.browser.models import BrowserAction, BrowserObservation, BrowserTaskSpec, InteractiveElement
 from aiops_agent.browser.playwright_tool import PlaywrightBrowserTool
 from aiops_agent.browser.planner import BrowserPlanner
 from aiops_agent.browser.risk import RiskEvaluator
+from aiops_agent.browser.skills.matcher import WebSkillMatcher
 from aiops_agent.tasks.models import TaskArtifact, ToolExecutionResult
 from aiops_agent.tools.base import BaseTool
+
+
+MAX_RUNTIME_RETRIES = 2
 
 
 class BrowserAgentTool(BaseTool):
@@ -24,6 +30,9 @@ class BrowserAgentTool(BaseTool):
         credential_store: CredentialStore | None = None,
         planner: BrowserPlanner | None = None,
         risk_evaluator: RiskEvaluator | None = None,
+        web_skill_matcher: WebSkillMatcher | None = None,
+        langgraph_checkpointer=None,
+        langgraph_store=None,
     ):
         self.audit_logger = audit_logger
         self.artifact_root = Path(artifact_root)
@@ -31,143 +40,51 @@ class BrowserAgentTool(BaseTool):
         self.credential_store = credential_store or CredentialStore()
         self.planner = planner or BrowserPlanner()
         self.risk_evaluator = risk_evaluator or RiskEvaluator()
+        self.web_skill_matcher = web_skill_matcher
         self._active_tools: dict[str, PlaywrightBrowserTool] = {}
+        from aiops_agent.browser.subgraph import WebAgentSubgraph
+        self.subgraph = WebAgentSubgraph(self, checkpointer=langgraph_checkpointer, store=langgraph_store)
 
     def execute(self, params: dict) -> ToolExecutionResult:
-        spec = self._spec_from_params(params)
-        session_id = str(params.get("session_id", "default"))
-        task_id = str(params.get("task_id", ""))
-        validation_error = self._validate_spec(spec, params)
-        if validation_error:
-            return ToolExecutionResult(
-                success=False,
-                error=validation_error,
-                retryable=False,
-                data={"status": "blocked", "goal": spec.user_goal, "site_key": spec.site_key, "workflow": spec.workflow},
-            )
-        spec.session_state_path = spec.session_state_path or self._default_session_state_path(session_id)
-        try:
-            self._attach_credentials(spec)
-        except CredentialError as exc:
-            return ToolExecutionResult(
-                success=False,
-                error=str(exc),
-                retryable=False,
-                data={"status": "failed", "goal": spec.user_goal, "credential_ref": spec.credential_ref},
-            )
-        trace_id = str(params.get("trace_id", ""))
-        active_key = self._active_tool_key(session_id, task_id)
-        tool = self._active_tools.get(active_key) if spec.confirmed_action else None
-        live_resume = tool is not None
-        if tool is None:
-            tool = PlaywrightBrowserTool(
-                session_id=session_id,
-                task_id=task_id,
-                artifact_root=self.artifact_root,
-                headless=bool(params.get("headless", self.headless)),
-                allowed_domains=spec.allowed_domains,
-                session_state_path=spec.session_state_path,
-                trace_enabled=spec.trace_enabled,
-                video_enabled=spec.video_enabled,
-                browser_channel=spec.browser_channel,
-                slow_mo_ms=spec.browser_slow_mo_ms,
-            )
-        steps: list[dict] = list(params.get("prior_steps") or []) if live_resume else []
-        artifacts: list[TaskArtifact] = []
-        consecutive_failures = 0
-        keep_browser_open = False
+        if params.get("web_thread_id"):
+            return self.subgraph.resume(params)
+        return self.subgraph.run(params)
 
-        self._record("browser.started", trace_id, task_id, session_id, 0, {"start_url": spec.start_url})
-        try:
-            for index in range(1, spec.max_steps + 1):
-                action = self._next_action(spec, steps)
-                step_result = self._execute_action(
-                    tool=tool,
-                    action=action,
-                    trace_id=trace_id,
-                    task_id=task_id,
-                    session_id=session_id,
-                    step_index=index,
-                    steps=steps,
-                    artifacts=artifacts,
-                    spec=spec,
-                )
-                if isinstance(step_result, ToolExecutionResult):
-                    if (step_result.data or {}).get("status") == "awaiting_confirmation":
-                        self._active_tools[active_key] = tool
-                        keep_browser_open = True
-                    return step_result
-                result, observation = step_result
+    def configure_langgraph_runtime(self, *, checkpointer=None, store=None) -> None:
+        from aiops_agent.browser.subgraph import WebAgentSubgraph
+        self.subgraph = WebAgentSubgraph(self, checkpointer=checkpointer, store=store)
 
-                if observation.page_type == "verification":
-                    artifacts.extend(self._artifacts_from_observation(tool.observe(last_action_result="verification blocked", force_artifact=True)))
-                    return self._blocked_result("遇到验证码、MFA 或二次校验，需要人工接手。", steps, observation, artifacts)
-                if spec.requires_login and action.type == "login_submit" and observation.page_type == "login":
-                    if not self._login_has_failure_signal(observation) and self._login_still_pending(steps):
-                        continue
-                    failed_observation = tool.observe(last_action_result="login failed", force_artifact=True)
-                    artifacts.extend(self._artifacts_from_observation(failed_observation))
-                    return self._blocked_result(self._login_failure_reason(failed_observation), steps, failed_observation, artifacts)
-                early_stop_reason = self._early_stop_reason(spec, result, observation, steps)
-                if early_stop_reason:
-                    stopped_observation = tool.observe(last_action_result="early stop", force_artifact=True)
-                    artifacts.extend(self._artifacts_from_observation(stopped_observation))
-                    return self._blocked_result(early_stop_reason, steps, stopped_observation, artifacts)
-                if action.type == "finish" and result.status == "success":
-                    break
-                if result.status == "success":
-                    consecutive_failures = 0
-                    continue
-                consecutive_failures += 1
-                if consecutive_failures >= spec.max_consecutive_failures or result.status == "terminal_failure":
-                    return self._blocked_result(result.error or "浏览器动作连续失败。", steps, observation, artifacts)
+    def get_state(self, thread_id: str):
+        return self.subgraph.get_state(thread_id)
 
-            else:
-                last_observation = tool.observe(last_action_result="step budget exceeded", force_artifact=True)
-                artifacts.extend(self._artifacts_from_observation(last_observation))
-                return self._blocked_result("达到最大浏览器步骤预算。", steps, last_observation, artifacts)
-            final_observation = tool.observe(last_action_result="task completed", force_artifact=True)
-            artifacts.extend(self._artifacts_from_observation(final_observation))
-            report_path = self._write_execution_report(spec, steps, final_observation, "completed", None)
-            artifacts.append(TaskArtifact(kind="execution_report", path=report_path))
-            answer = self._answer_from_observation(spec, final_observation, steps)
-            if self._requires_answer(spec.user_goal) and not answer.get("answer"):
-                return self._blocked_result("任务要求返回答案，但未能从当前页面提取到明确结果。", steps, final_observation, artifacts)
-            self._record(
-                "task.completed",
-                trace_id,
-                task_id,
-                session_id,
-                len(steps),
-                {"current_url": final_observation.url, "result": "success"},
-            )
-            self._active_tools.pop(active_key, None)
-            return ToolExecutionResult(
-                success=True,
-                data={
-                    "status": "completed",
-                    "goal": spec.user_goal,
-                    "answer": answer,
-                    "last_observation": asdict(final_observation),
-                    "steps": steps,
-                    "summary": self._execution_summary(spec, steps),
-                    "session_state_path": self._save_session_state(tool),
-                    "execution_report_path": report_path,
-                },
-                artifacts=artifacts,
-            )
-        except Exception as exc:
-            self._active_tools.pop(active_key, None)
-            return ToolExecutionResult(
-                success=False,
-                error=str(exc),
-                retryable=False,
-                data={"status": "failed", "goal": spec.user_goal, "steps": steps},
-                artifacts=artifacts,
-            )
-        finally:
-            if not keep_browser_open:
-                tool.close()
+    def get_state_history(self, thread_id: str):
+        return self.subgraph.get_state_history(thread_id)
+
+    def _create_browser_tool(
+        self,
+        *,
+        session_id: str,
+        task_id: str,
+        headless: bool,
+        allowed_domains: list[str],
+        session_state_path: str | None,
+        trace_enabled: bool,
+        video_enabled: bool,
+        browser_channel: str | None,
+        slow_mo_ms: int,
+    ) -> PlaywrightBrowserTool:
+        return PlaywrightBrowserTool(
+            session_id=session_id,
+            task_id=task_id,
+            artifact_root=self.artifact_root,
+            headless=headless,
+            allowed_domains=allowed_domains,
+            session_state_path=session_state_path,
+            trace_enabled=trace_enabled,
+            video_enabled=video_enabled,
+            browser_channel=browser_channel,
+            slow_mo_ms=slow_mo_ms,
+        )
 
     def _spec_from_params(self, params: dict) -> BrowserTaskSpec:
         actions = [BrowserAction(**item) for item in params.get("actions", [])]
@@ -323,6 +240,45 @@ class BrowserAgentTool(BaseTool):
             artifacts.extend(self._artifacts_from_observation(observation))
             return self._blocked_result(f"规划动作与用户意图不一致，已停止执行：{intent_reason}", steps, observation, artifacts)
         runtime_action = self._runtime_action(proposed_action)
+        self._prepare_runtime_action_for_risk(spec, proposed_action, runtime_action)
+        self._record_action_proposed(
+            action=proposed_action,
+            trace_id=trace_id,
+            task_id=task_id,
+            session_id=session_id,
+            step_index=step_index,
+        )
+        if proposed_action.requires_confirmation:
+            return self._awaiting_confirmation_result(
+                tool=tool,
+                action=proposed_action,
+                trace_id=trace_id,
+                task_id=task_id,
+                session_id=session_id,
+                step_index=step_index,
+                steps=steps,
+                artifacts=artifacts,
+                spec=spec,
+            )
+        return self._execute_runtime_action(
+            tool=tool,
+            proposed_action=proposed_action,
+            runtime_action=runtime_action,
+            trace_id=trace_id,
+            task_id=task_id,
+            session_id=session_id,
+            step_index=step_index,
+            steps=steps,
+            artifacts=artifacts,
+            spec=spec,
+        )
+
+    def _prepare_runtime_action_for_risk(
+        self,
+        spec: BrowserTaskSpec,
+        proposed_action: BrowserAction,
+        runtime_action: BrowserAction,
+    ) -> str:
         risk_level = self.risk_evaluator.classify(runtime_action)
         proposed_action.risk_level = risk_level
         runtime_action.risk_level = risk_level
@@ -331,59 +287,119 @@ class BrowserAgentTool(BaseTool):
             False if confirmed_execution else proposed_action.requires_confirmation or self.risk_evaluator.requires_confirmation(runtime_action)
         )
         runtime_action.requires_confirmation = proposed_action.requires_confirmation
+        return risk_level
+
+    def _record_action_proposed(
+        self,
+        *,
+        action: BrowserAction,
+        trace_id: str,
+        task_id: str,
+        session_id: str,
+        step_index: int,
+    ) -> None:
         self._record(
             "action.proposed",
             trace_id,
             task_id,
             session_id,
             step_index,
-            {"action": self._safe_action_dict(proposed_action), "risk_level": risk_level},
+            {"action": self._safe_action_dict(action), "risk_level": action.risk_level},
         )
-        if proposed_action.requires_confirmation:
-            if step_index == 1 and not spec.start_url:
-                observation = BrowserObservation(
-                    title="未打开页面",
-                    last_action_result="blocked for confirmation",
-                    blocking_reason="缺少站点入口且动作可能产生远端副作用",
-                )
-            else:
-                observation = tool.observe(last_action_result="blocked for confirmation", force_artifact=True)
-            artifacts.extend(self._artifacts_from_observation(observation))
-            event_type = "action.blocked_for_unknown_risk" if risk_level == "unknown_risk" else "action.blocked_for_confirmation"
-            self._record(
-                event_type,
-                trace_id,
-                task_id,
-                session_id,
-                step_index,
-                {
-                    "current_url": observation.url,
-                    "action_type": proposed_action.type,
-                    "risk_level": risk_level,
-                    "summary": self._confirmation_summary(proposed_action, observation),
-                },
-            )
-            state_path = self._save_session_state(tool)
-            return ToolExecutionResult(
-                success=False,
-                error="浏览器动作需要人工确认，未执行可能产生远端副作用的操作。",
-                retryable=False,
-                data={
-                    "status": "awaiting_confirmation",
-                    "confirmation_summary": self._confirmation_summary(proposed_action, observation),
-                    "pending_action": self._safe_action_dict(proposed_action),
-                    "pending_action_raw": asdict(proposed_action),
-                    "replay_actions": [asdict(action) for action in self._replay_actions(steps)],
-                    "completed_action_keys": self._completed_action_keys(steps),
-                    "resume_url": observation.url,
-                    "session_state_path": state_path,
-                    "last_observation": asdict(observation),
-                    "steps": steps,
-                },
-                artifacts=artifacts,
-            )
 
-        result = tool.execute(runtime_action)
+    def _awaiting_confirmation_result(
+        self,
+        *,
+        tool: PlaywrightBrowserTool,
+        action: BrowserAction,
+        trace_id: str,
+        task_id: str,
+        session_id: str,
+        step_index: int,
+        steps: list[dict],
+        artifacts: list[TaskArtifact],
+        spec: BrowserTaskSpec,
+    ) -> ToolExecutionResult:
+        if step_index == 1 and not spec.start_url:
+            observation = BrowserObservation(
+                title="未打开页面",
+                last_action_result="blocked for confirmation",
+                blocking_reason="缺少站点入口且动作可能产生远端副作用",
+            )
+        else:
+            observation = tool.observe(last_action_result="blocked for confirmation", force_artifact=True)
+        artifacts.extend(self._artifacts_from_observation(observation))
+        event_type = "action.blocked_for_unknown_risk" if action.risk_level == "unknown_risk" else "action.blocked_for_confirmation"
+        self._record(
+            event_type,
+            trace_id,
+            task_id,
+            session_id,
+            step_index,
+            {
+                "current_url": observation.url,
+                "action_type": action.type,
+                "risk_level": action.risk_level,
+                "summary": self._confirmation_summary(action, observation),
+            },
+        )
+        state_path = self._save_session_state(tool)
+        return ToolExecutionResult(
+            success=False,
+            error="浏览器动作需要人工确认，未执行可能产生远端副作用的操作。",
+            retryable=False,
+            data={
+                "status": "awaiting_confirmation",
+                "confirmation_summary": self._confirmation_summary(action, observation),
+                "pending_action": self._safe_action_dict(action),
+                "pending_action_raw": asdict(action),
+                "replay_actions": [asdict(action) for action in self._replay_actions(steps)],
+                "completed_action_keys": self._completed_action_keys(steps),
+                "resume_url": observation.url,
+                "session_state_path": state_path,
+                "last_observation": asdict(observation),
+                "steps": steps,
+                "canonical_action_trace": build_canonical_action_trace(
+                    steps,
+                    status="awaiting_confirmation",
+                    task_id=task_id,
+                    session_id=session_id,
+                    pending_action=asdict(action),
+                ),
+            },
+            artifacts=artifacts,
+        )
+
+    def _execute_runtime_action(
+        self,
+        *,
+        tool: PlaywrightBrowserTool,
+        proposed_action: BrowserAction,
+        runtime_action: BrowserAction,
+        trace_id: str,
+        task_id: str,
+        session_id: str,
+        step_index: int,
+        steps: list[dict],
+        artifacts: list[TaskArtifact],
+        spec: BrowserTaskSpec,
+    ) -> tuple[ActionResult, BrowserObservation]:
+        retry_attempts = 0
+        while True:
+            result = tool.execute(runtime_action)
+            if not self._should_retry_runtime_action(spec, proposed_action, result, retry_attempts):
+                break
+            retry_attempts += 1
+            self._record_action_retrying(
+                action=proposed_action,
+                result=result,
+                trace_id=trace_id,
+                task_id=task_id,
+                session_id=session_id,
+                step_index=step_index,
+                retry_attempt=retry_attempts,
+            )
+            time.sleep(self._retry_backoff_seconds(retry_attempts))
         observation = result.observation
         self._record(
             "action.executed",
@@ -394,9 +410,10 @@ class BrowserAgentTool(BaseTool):
             {
                 "current_url": observation.url,
                 "action_type": proposed_action.type,
-                "risk_level": risk_level,
+                "risk_level": proposed_action.risk_level,
                 "result": result.status,
                 "error": result.error,
+                "retry_attempts": retry_attempts,
             },
         )
         self._record(
@@ -414,6 +431,7 @@ class BrowserAgentTool(BaseTool):
             },
         )
         reflection = self._reflect_after_action(spec, proposed_action, result, observation, steps)
+        reflection["retry_attempts"] = retry_attempts
         self._record(
             "action.reflected",
             trace_id,
@@ -434,6 +452,74 @@ class BrowserAgentTool(BaseTool):
         )
         artifacts.extend(self._artifacts_from_observation(observation))
         return result, observation
+
+    def _should_retry_runtime_action(self, spec: BrowserTaskSpec, action: BrowserAction, result, retry_attempts: int) -> bool:
+        if retry_attempts >= MAX_RUNTIME_RETRIES:
+            return False
+        if result.status != "retryable_failure":
+            return False
+        if action.requires_confirmation or action.risk_level in {"unsafe_mutation", "unknown_risk"}:
+            return False
+        if action.type == "login_submit":
+            return False
+        if action.type in {"open_url", "observe_page", "extract_text"}:
+            return True
+        terminal_reason = self._failed_action_terminal_reason(spec, self._safe_action_dict(action), result.error or "")
+        if terminal_reason:
+            return False
+        return self._looks_like_transient_browser_failure(result.error or "")
+
+    def _record_action_retrying(
+        self,
+        *,
+        action: BrowserAction,
+        result,
+        trace_id: str,
+        task_id: str,
+        session_id: str,
+        step_index: int,
+        retry_attempt: int,
+    ) -> None:
+        self._record(
+            "action.retrying",
+            trace_id,
+            task_id,
+            session_id,
+            step_index,
+            {
+                "current_url": result.observation.url,
+                "action_type": action.type,
+                "risk_level": action.risk_level,
+                "result": result.status,
+                "error": result.error,
+                "retry_attempt": retry_attempt,
+            },
+        )
+
+    def _retry_backoff_seconds(self, retry_attempt: int) -> float:
+        return min(0.02 * (2 ** max(retry_attempt - 1, 0)), 0.1)
+
+    def _looks_like_transient_browser_failure(self, error: str) -> bool:
+        lowered = error.lower()
+        return any(
+            marker in lowered
+            for marker in (
+                "timeout",
+                "waiting for",
+                "navigation",
+                "load state",
+                "not visible",
+                "not enabled",
+                "intercepts pointer events",
+                "detached",
+                "closed",
+                "net::",
+                "err_",
+                "temporarily",
+                "暂时",
+                "超时",
+            )
+        )
 
     def _runtime_action(self, action: BrowserAction) -> BrowserAction:
         if action.type == "type_username":
@@ -1018,7 +1104,12 @@ class BrowserAgentTool(BaseTool):
             success=False,
             error=reason,
             retryable=False,
-            data={"status": "blocked", "last_observation": asdict(observation), "steps": steps},
+            data={
+                "status": "blocked",
+                "last_observation": asdict(observation),
+                "steps": steps,
+                "canonical_action_trace": build_canonical_action_trace(steps, status="blocked"),
+            },
             artifacts=artifacts,
         )
 

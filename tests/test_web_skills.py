@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from aiops_agent.agent.controller import AgentController
 import pytest
 
+from aiops_agent.browser.action_trace import build_canonical_action_trace
 from aiops_agent.browser.skills import (
     WebSkillGenerationError,
     WebSkillGenerator,
@@ -161,6 +162,25 @@ def test_web_skill_generator_writes_agentskills_layout_and_parameterizes_values(
     assert "password" not in workflow_text.lower()
 
 
+def test_web_skill_generator_prefers_canonical_action_trace(tmp_path):
+    store = WebSkillStore(tmp_path / "web_skills")
+    task = _successful_web_task()
+    data = task.result["data"]
+    data["canonical_action_trace"] = build_canonical_action_trace(
+        data["steps"],
+        status="completed",
+        task_id=task.id,
+        session_id=task.session_id or "",
+    )
+    del data["steps"]
+
+    result = WebSkillGenerator(store).generate_from_task(task, name="demo-canonical-search-user")
+    workflow = json.loads((result.path / "assets" / "workflow.json").read_text(encoding="utf-8"))
+
+    assert result.inputs == ["username"]
+    assert workflow["actions"][2]["value"] == "{{username}}"
+
+
 def test_web_skill_generator_parameterizes_date_range_and_excludes_finish_value(tmp_path):
     store = WebSkillStore(tmp_path / "web_skills")
     result = WebSkillGenerator(store).generate_from_task(
@@ -292,6 +312,38 @@ def test_web_skill_matcher_keeps_legacy_input_value_skill_compatible(tmp_path):
 
     assert match is not None
     assert match.parameters == {"input_value": "alice"}
+
+
+def test_web_skill_matcher_supports_workflow_v2_steps(tmp_path):
+    store = WebSkillStore(tmp_path / "web_skills")
+    store.write(
+        name="v2-search",
+        frontmatter={
+            "name": "v2-search",
+            "description": "workflow v2 skill",
+            "compatibility": ["opsAgent web_action"],
+        },
+        body="v2",
+        workflow={
+            "schema_version": "opsagent.web_skill.workflow.v2",
+            "skill_name": "v2-search",
+            "site_key": "demo",
+            "inputs": [{"name": "username", "required": True}],
+            "match": {"keywords": ["查询用户"], "fields": ["用户名"], "answer_types": []},
+            "execution": {"auto_plan": False, "requires_login": False, "fallback_to_llm_once": True},
+            "steps": [
+                {"type": "type", "target_hint": "用户名", "value": "{{username}}"},
+                {"type": "finish", "expected_outcome": "done"},
+            ],
+        },
+        notes="v2 notes",
+    )
+    matcher = WebSkillMatcher(store)
+
+    match = matcher.match("查询用户 alice", {"site_key": "demo", "workflow_fields": {"username": "alice"}})
+
+    assert match is not None
+    assert match.actions[0].value == "alice"
 
 
 def test_planning_service_uses_matched_web_skill_as_fixed_actions(tmp_path):

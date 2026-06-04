@@ -36,6 +36,14 @@ class FakeSessionStore:
         return self.sessions.get(session_id)
 
 
+class FakeTaskManager:
+    def __init__(self):
+        self.tasks = {}
+
+    def load(self, task_id):
+        return self.tasks.get(task_id)
+
+
 class FakeController:
     def __init__(self, statuses=None, confirm_statuses=None):
         self.statuses = list(statuses or [])
@@ -43,6 +51,7 @@ class FakeController:
         self.run_calls = []
         self.confirm_calls = []
         self.session_store = FakeSessionStore()
+        self.task_manager = FakeTaskManager()
 
     def run(self, text, **kwargs):
         self.run_calls.append((text, kwargs))
@@ -50,6 +59,19 @@ class FakeController:
         session_id = kwargs.get("session_id") or f"session-{len(self.run_calls)}"
         if callback:
             callback(ProgressEvent(stage="intent.parsed", message="已识别意图。", session_id=session_id))
+        task = self._build_task(text, kwargs, session_id)
+        self.task_manager.tasks[task.id] = task
+        return task
+
+    def stream_run(self, text, **kwargs):
+        self.run_calls.append((text, kwargs))
+        session_id = kwargs.get("session_id") or f"session-{len(self.run_calls)}"
+        yield ProgressEvent(stage="intent.parsed", message="已识别意图。", session_id=session_id)
+        task = self._build_task(text, kwargs, session_id)
+        self.task_manager.tasks[task.id] = task
+        yield ProgressEvent(stage="task.completed", message="任务已结束。", task_id=task.id, session_id=session_id)
+
+    def _build_task(self, text, kwargs, session_id):
         status = self.statuses.pop(0) if self.statuses else "success"
         task = _task(text, task_id=f"task-{len(self.run_calls)}", session_id=session_id, status=status)
         if status == "awaiting_confirmation":

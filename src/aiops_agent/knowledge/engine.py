@@ -32,29 +32,10 @@ class KnowledgeEngine:
         history = conversation_history or []
         t0 = time.monotonic()
 
-        rewritten = self._retriever.rewrite_query(question, history)
-
-        if self.config.index_mode == "hybrid":
-            bm25, bm25_docs = self._get_bm25()
-            docs = self._retrieve_hybrid_with_retry(rewritten, bm25, bm25_docs)
-        elif self.config.index_mode == "vector":
-            docs = self._retrieve_vector_with_retry(rewritten)
-        else:
-            bm25, bm25_docs = self._get_bm25()
-            docs = self._retriever.retrieve_keyword(rewritten, bm25, bm25_docs)
-
-        docs = self._expand_graph_context(rewritten, docs)
-        answer = self._retriever.synthesize_with_history(rewritten, docs, history)
-
-        if self.config.enable_eval and docs:
-            from aiops_agent.knowledge.evaluator import RAGEvaluator
-            evaluator = RAGEvaluator(self.llm_config)
-            eval_result = evaluator.evaluate(rewritten, answer.answer, docs)
-            answer.confidence = eval_result.confidence
-            answer.evaluation = {
-                "faithfulness": eval_result.faithfulness,
-                "relevance": eval_result.relevance,
-            }
+        rewritten = self.rewrite_query(question, history)
+        docs = self.retrieve_documents(rewritten)
+        answer = self.synthesize_answer(rewritten, docs, history)
+        self.evaluate_answer(rewritten, answer, docs)
 
         latency_ms = int((time.monotonic() - t0) * 1000)
         log_kv(
@@ -70,6 +51,35 @@ class KnowledgeEngine:
             latency_ms=latency_ms,
         )
 
+        return answer
+
+    def rewrite_query(self, question: str, conversation_history: list[dict] | None = None) -> str:
+        return self._retriever.rewrite_query(question, conversation_history or [])
+
+    def retrieve_documents(self, question: str):
+        if self.config.index_mode == "hybrid":
+            bm25, bm25_docs = self._get_bm25()
+            docs = self._retrieve_hybrid_with_retry(question, bm25, bm25_docs)
+        elif self.config.index_mode == "vector":
+            docs = self._retrieve_vector_with_retry(question)
+        else:
+            bm25, bm25_docs = self._get_bm25()
+            docs = self._retriever.retrieve_keyword(question, bm25, bm25_docs)
+        return self._expand_graph_context(question, docs)
+
+    def synthesize_answer(self, question: str, docs, conversation_history: list[dict] | None = None) -> KnowledgeAnswer:
+        return self._retriever.synthesize_with_history(question, docs, conversation_history or [])
+
+    def evaluate_answer(self, question: str, answer: KnowledgeAnswer, docs) -> KnowledgeAnswer:
+        if self.config.enable_eval and docs:
+            from aiops_agent.knowledge.evaluator import RAGEvaluator
+            evaluator = RAGEvaluator(self.llm_config)
+            eval_result = evaluator.evaluate(question, answer.answer, docs)
+            answer.confidence = eval_result.confidence
+            answer.evaluation = {
+                "faithfulness": eval_result.faithfulness,
+                "relevance": eval_result.relevance,
+            }
         return answer
 
     def rebuild_index(self, force: bool = False) -> None:

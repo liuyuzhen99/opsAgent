@@ -135,6 +135,9 @@ class LLMProviderConfig:
     fallback_provider: str = ""
     fallback_model: str = ""
     role_models: dict[str, str] = field(default_factory=dict)
+    langmem_summary_enabled: bool = False
+    langmem_max_tokens: int = 1024
+    langmem_max_summary_tokens: int = 256
 
     @property
     def default_headers(self) -> dict[str, str]:
@@ -167,6 +170,10 @@ class LLMProviderConfig:
             errors.append("LLM max_retries 不能小于 0")
         if self.max_tokens <= 0:
             errors.append("LLM max_tokens 必须大于 0")
+        if self.langmem_summary_enabled and self.langmem_max_tokens <= 0:
+            errors.append("LLM langmem_summary.max_tokens 必须大于 0")
+        if self.langmem_summary_enabled and self.langmem_max_summary_tokens <= 0:
+            errors.append("LLM langmem_summary.max_summary_tokens 必须大于 0")
         if errors:
             raise ConfigError("；".join(errors))
 
@@ -309,6 +316,12 @@ def load_anthropic_config(config_path: str | None = None) -> LLMProviderConfig:
         default_profile = profiles.get("default", {})
         if isinstance(default_profile, dict):
             role_models = dict(default_profile.get("role_models", {}))
+    langmem_summary = raw.get("langmem_summary", {})
+    if not isinstance(langmem_summary, dict):
+        langmem_summary = {}
+    langmem_enabled = bool(langmem_summary.get("enabled", False))
+    if os.environ.get("AIOPS_LANGMEM_SUMMARY_ENABLED"):
+        langmem_enabled = os.environ["AIOPS_LANGMEM_SUMMARY_ENABLED"].lower() in {"1", "true", "yes", "on"}
 
     return LLMProviderConfig(
         provider=raw.get("provider", "anthropic"),
@@ -324,6 +337,9 @@ def load_anthropic_config(config_path: str | None = None) -> LLMProviderConfig:
         fallback_provider=raw.get("fallback_provider", ""),
         fallback_model=raw.get("fallback_model", ""),
         role_models=dict(role_models),
+        langmem_summary_enabled=langmem_enabled,
+        langmem_max_tokens=int(langmem_summary.get("max_tokens", 1024)),
+        langmem_max_summary_tokens=int(langmem_summary.get("max_summary_tokens", 256)),
     )
 
 

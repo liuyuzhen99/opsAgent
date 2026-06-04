@@ -81,9 +81,21 @@ def test_controller_confirm_resumes_pending_browser_action(tmp_path, monkeypatch
     monkeypatch.chdir(tmp_path)
 
     controller = create_controller(str(config_path), str(llm_config_path))
-    task = controller.run("请打开 http://example.test/form 并保存权限设置")
+    events = []
+    task = controller.run("请打开 http://example.test/form 并保存权限设置", progress_callback=events.append)
+    stages = [event.stage for event in events]
     assert task.status == "awaiting_confirmation"
     assert task.result["data"]["pending_action_raw"]["type"] == "click"
+    assert "web.action.proposed" in stages
+    assert "web.action.executed" in stages
+    assert "web.page.observed" in stages
+    assert stages.index("web.action.proposed") < stages.index("interrupt.requested")
+    interrupted_state = controller.get_state(task.id)
+    assert not interrupted_state.interrupts
+    web_state = controller.get_web_state(task.id)
+    assert web_state.interrupts
+    assert web_state.interrupts[0].value["confirmation_type"] == "web_action"
+    assert web_state.interrupts[0].value["langgraph"]["node"] == "risk_gate"
     assert ConfirmationFakeBrowser.instance_count == 1
     assert ConfirmationFakeBrowser.close_calls == 0
 
@@ -96,5 +108,35 @@ def test_controller_confirm_resumes_pending_browser_action(tmp_path, monkeypatch
     actions = [step["action"]["type"] for step in resumed.result["data"]["steps"]]
     assert actions[0] == "open_url"
     assert "click" in actions
+    resumed_state = controller.get_state(task.id)
+    assert not resumed_state.interrupts
+    resumed_web_state = controller.get_web_state(task.id)
+    assert not resumed_web_state.interrupts
     saved_task = json.loads((tmp_path / "storage" / "tasks" / f"{task.id}.json").read_text(encoding="utf-8"))
     assert saved_task["status"] == "success"
+
+
+def test_controller_confirm_crash_resumes_web_subgraph_from_checkpoint(tmp_path, monkeypatch):
+    ConfirmationFakeBrowser.instance_count = 0
+    ConfirmationFakeBrowser.close_calls = 0
+    ConfirmationFakeBrowser.seen_state_paths = []
+    monkeypatch.setattr("aiops_agent.browser.agent.PlaywrightBrowserTool", ConfirmationFakeBrowser)
+    config_path = tmp_path / "rpa.json"
+    llm_config_path = tmp_path / "llm.json"
+    _write_rpa_config(config_path)
+    _write_llm_config(llm_config_path, enabled=False)
+    monkeypatch.chdir(tmp_path)
+
+    controller = create_controller(str(config_path), str(llm_config_path))
+    task = controller.run("请打开 http://example.test/form 并保存权限设置")
+    state_path = task.result["data"]["session_state_path"]
+    web_thread_id = task.result["data"]["web_thread_id"]
+
+    restarted = create_controller(str(config_path), str(llm_config_path))
+    resumed = restarted.confirm(task.id)
+
+    assert resumed.status == "success"
+    assert resumed.result["data"]["web_thread_id"] == web_thread_id
+    assert ConfirmationFakeBrowser.instance_count == 2
+    assert ConfirmationFakeBrowser.seen_state_paths[-1] == state_path
+    assert [step["action"]["type"] for step in resumed.result["data"]["steps"]][0] == "open_url"

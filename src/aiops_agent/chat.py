@@ -100,21 +100,38 @@ class ChatRunner:
                 self._handle_confirmation(task)
 
     def _run_task(self, text: str) -> Task:
-        return self.controller.run(
-            text,
-            session_id=self.current_session_id,
-            llm_profile=self.options.llm_profile,
-            max_steps=self.options.max_steps,
-            require_confirmation=self.options.require_confirmation,
-            allowed_domains=self.options.allowed_domains,
-            credential_ref=self.options.credential_ref,
-            browser_trace=self.options.browser_trace,
-            browser_video=self.options.browser_video,
-            browser_site=self.options.browser_site,
-            browser_channel=self.options.browser_channel,
-            browser_slow_mo_ms=self.options.browser_slow_mo_ms,
-            progress_callback=self._print_progress,
-        )
+        kwargs = {
+            "session_id": self.current_session_id,
+            "llm_profile": self.options.llm_profile,
+            "max_steps": self.options.max_steps,
+            "require_confirmation": self.options.require_confirmation,
+            "allowed_domains": self.options.allowed_domains,
+            "credential_ref": self.options.credential_ref,
+            "browser_trace": self.options.browser_trace,
+            "browser_video": self.options.browser_video,
+            "browser_site": self.options.browser_site,
+            "browser_channel": self.options.browser_channel,
+            "browser_slow_mo_ms": self.options.browser_slow_mo_ms,
+        }
+        if hasattr(self.controller, "stream_run"):
+            task_id: str | None = None
+            for event in self.controller.stream_run(text, **kwargs):
+                if event.task_id:
+                    task_id = event.task_id
+                self._print_progress(event)
+            task = self._load_task(task_id)
+            if task is None:
+                raise RuntimeError(f"任务流结束但无法加载任务: {task_id or '-'}")
+            return task
+        return self.controller.run(text, progress_callback=self._print_progress, **kwargs)
+
+    def _load_task(self, task_id: str | None) -> Task | None:
+        if not task_id:
+            return None
+        task_manager = getattr(self.controller, "task_manager", None)
+        if task_manager is None or not hasattr(task_manager, "load"):
+            return None
+        return task_manager.load(task_id)
 
     def _handle_confirmation(self, task: Task) -> None:
         current = task

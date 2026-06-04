@@ -58,7 +58,7 @@ class WebSkillRenderer:
         if missing:
             raise WebSkillValidationError("missing required skill parameters: " + ", ".join(missing))
         actions: list[BrowserAction] = []
-        for raw_action in workflow.get("actions") or []:
+        for raw_action in self._workflow_actions(workflow):
             if not isinstance(raw_action, dict):
                 continue
             payload = {
@@ -76,6 +76,9 @@ class WebSkillRenderer:
                 payload["value"] = str(entities.get("start_url") or "")
             actions.append(BrowserAction(**payload))
         return actions
+
+    def _workflow_actions(self, workflow: dict[str, Any]) -> list:
+        return list(workflow.get("actions") or workflow.get("steps") or [])
 
     def _value_from_entities(self, name: str, workflow_fields: dict[str, Any]) -> str | None:
         if name in workflow_fields and workflow_fields[name]:

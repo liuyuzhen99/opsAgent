@@ -5,6 +5,6 @@ __pycache__/
 configs/*
 configs/llm.json
 configs/rpa.json
-storage/
+/storage/
 src/aiops_agent/__pycache__/
 src/aiops_agent/*.pyc

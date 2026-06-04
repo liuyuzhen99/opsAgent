@@ -38,7 +38,7 @@ class BrowserPlanner:
                 risk_level="safe_read",
             )
 
-        if spec.requires_remote_mutation and not spec.start_url:
+        if spec.requires_remote_mutation and not spec.start_url and not self._remote_mutation_already_done(steps):
             return self._remote_mutation_action(spec)
 
         if observation is not None and observation.page_type == "verification":
@@ -67,7 +67,7 @@ class BrowserPlanner:
         if llm_action is not None:
             return llm_action
 
-        if spec.requires_remote_mutation:
+        if spec.requires_remote_mutation and not self._remote_mutation_already_done(steps):
             return self._remote_mutation_action(spec)
 
         draft_action = self._local_draft_action(spec, observation, successful_actions)
@@ -211,6 +211,15 @@ class BrowserPlanner:
             risk_level="unsafe_mutation",
             requires_confirmation=True,
         )
+
+    def _remote_mutation_already_done(self, steps: list[dict]) -> bool:
+        for step in steps:
+            if step.get("result") != "success":
+                continue
+            action = step.get("action") or {}
+            if action.get("risk_level") == "unsafe_mutation" or action.get("requires_confirmation"):
+                return True
+        return False
 
     def _local_draft_action(
         self,

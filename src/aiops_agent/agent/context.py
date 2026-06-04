@@ -20,6 +20,12 @@ if TYPE_CHECKING:
 
 
 class ContextCompressor:
+    """Legacy session-memory shim kept for migration tests and JSON compatibility.
+
+    New runtime paths use SessionMemoryManager plus web/knowledge memory
+    strategies. Do not reintroduce this class as the central memory layer.
+    """
+
     def __init__(self, llm_provider: BaseLLMProvider | None = None):
         self.llm_provider = llm_provider
 

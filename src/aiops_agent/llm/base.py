@@ -49,6 +49,9 @@ class BaseLLMProvider:
     def summarize_session_memory(self, memory_facts: dict[str, Any]) -> str:
         raise NotImplementedError
 
+    def build_summary_model(self):
+        raise NotImplementedError
+
     def plan_browser_action(
         self,
         *,

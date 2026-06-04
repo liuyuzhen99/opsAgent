@@ -18,7 +18,9 @@ class TaskManager:
         llm_profile: str | None = None,
         max_steps: int = 20,
         requires_explicit_confirmation: bool = False,
+        task_id: str | None = None,
     ) -> Task:
+        kwargs = {"id": task_id} if task_id else {}
         task = Task(
             input=task_input,
             trace_id=trace_id,
@@ -26,6 +28,7 @@ class TaskManager:
             llm_profile=llm_profile,
             max_steps=max_steps,
             requires_explicit_confirmation=requires_explicit_confirmation,
+            **kwargs,
         )
         self.persist(task)
         return task

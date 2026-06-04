@@ -194,6 +194,11 @@ class LangChainLLMProvider(BaseLLMProvider):
         )
         return raw_text
 
+    def build_summary_model(self):
+        if not self.enabled:
+            raise LLMError("LLM summary model disabled")
+        return self._build_model("summary")
+
     def plan_browser_action(
         self,
         *,

@@ -289,11 +289,11 @@ def test_task_plan_prefers_qa_memory_and_falls_back_to_legacy_metadata():
 
 
 def test_task_plan_attaches_retrieved_session_memory_to_entities():
-    class _FakeCompressor:
+    class _FakeSessionMemoryManager:
         def __init__(self):
             self.calls = []
 
-        def retrieve(self, session, intent, query, limit=5):
+        def retrieve(self, session, intent, query, *, limit=5, fallback=None):
             self.calls.append((session.id, intent, query, limit))
             return {
                 "summary": "session summary",
@@ -305,7 +305,7 @@ def test_task_plan_attaches_retrieved_session_memory_to_entities():
             }
 
     planning = _FakePlanningService()
-    compressor = _FakeCompressor()
+    memory_manager = _FakeSessionMemoryManager()
     controller = AgentController(
         parser=None,
         task_manager=None,
@@ -314,20 +314,52 @@ def test_task_plan_attaches_retrieved_session_memory_to_entities():
         audit_logger=_FakeAuditLogger(),
         session_store=None,
         planning_service=planning,
-        context_compressor=compressor,
+        session_memory_manager=memory_manager,
     )
     task = _task("qa-plan-retrieve", "ops_qa", text="继续解释一下")
     session = SimpleNamespace(id="session", metadata={})
 
     controller._task_plan_node({"task": task, "session": session, "progress_callback": None})
 
-    assert compressor.calls == [("session", "ops_qa", "继续解释一下", 5)]
+    assert memory_manager.calls == [("session", "ops_qa", "继续解释一下", 5)]
     assert planning.entities["session_memory"]["summary"] == "session summary"
     assert planning.entities["session_memory"]["task_matches"][0]["task_id"] == "match-1"
     assert planning.entities["conversation_history"] == [{"question": "retrieved Q", "answer": "retrieved A"}]
 
 
-def test_persist_audit_delegates_qa_memory_write_to_compressor():
+def test_controller_does_not_call_legacy_context_compressor_at_runtime():
+    class _LegacyCompressor:
+        def compress(self, session, task):
+            raise AssertionError("legacy compressor must not run")
+
+        def retrieve(self, session, intent, query, limit=5):
+            raise AssertionError("legacy compressor must not retrieve")
+
+    class _FakeSessionMemoryManager:
+        def retrieve(self, session, intent, query, *, limit=5, fallback=None):
+            return {"summary": "from store", "qa_memory": []}
+
+    planning = _FakePlanningService()
+    controller = AgentController(
+        parser=None,
+        task_manager=None,
+        tool_executor=None,
+        summarizer=None,
+        audit_logger=_FakeAuditLogger(),
+        session_store=None,
+        planning_service=planning,
+        context_compressor=_LegacyCompressor(),
+        session_memory_manager=_FakeSessionMemoryManager(),
+    )
+    task = _task("runtime-memory", "ops_qa")
+    session = SimpleNamespace(id="session", metadata={})
+
+    controller._task_plan_node({"task": task, "session": session, "progress_callback": None})
+
+    assert planning.entities["session_memory"]["summary"] == "from store"
+
+
+def test_persist_audit_syncs_legacy_session_and_store_memory():
     class _FakeTaskManager:
         def __init__(self):
             self.persisted = []
@@ -342,29 +374,26 @@ def test_persist_audit_delegates_qa_memory_write_to_compressor():
         def save(self, session):
             self.saved.append(session.id)
 
-    class _FakeCompressor:
-        def compress(self, session, task):
-            assert "qa_turns" not in session.metadata
-            session.metadata["compressed"] = "yes"
-            return session
-
     task_manager = _FakeTaskManager()
     session_store = _FakeSessionStore()
+    audit_logger = _FakeAuditLogger()
     controller = AgentController(
         parser=None,
         task_manager=task_manager,
         tool_executor=None,
         summarizer=None,
-        audit_logger=_FakeAuditLogger(),
+        audit_logger=audit_logger,
         session_store=session_store,
-        context_compressor=_FakeCompressor(),
     )
     session = AgentSession(id="session")
     task = _task("qa-done", "ops_qa", data={"answer": {"answer": "A"}})
 
     controller._persist_audit_node({"task": task, "session": session, "progress_callback": None})
 
-    assert session.metadata["compressed"] == "yes"
+    assert session.qa_memory[0].answer == "A"
+    assert "qa_turns" in session.metadata
+    assert "memory.legacy.synced" in [event.event_type for event in audit_logger.events]
+    assert "memory.store.synced" in [event.event_type for event in audit_logger.events]
     assert task_manager.persisted == ["qa-done"]
     assert session_store.saved == ["session"]
 
@@ -409,3 +438,55 @@ def test_save_web_skill_prefers_browser_memory_over_legacy_metadata():
 
     assert result.task_id == "preferred"
     assert result.name == "skill"
+
+
+def test_save_web_skill_prefers_langgraph_store_over_legacy_session():
+    class _FakeTaskManager:
+        def __init__(self, tasks):
+            self.tasks = tasks
+
+        def load(self, task_id):
+            return self.tasks.get(task_id)
+
+    class _FakeSessionStore:
+        def __init__(self, session):
+            self.session = session
+
+        def load(self, session_id):
+            return self.session
+
+    class _FakeGenerator:
+        def generate_from_task(self, task, name=None):
+            return SimpleNamespace(
+                task_id=task.id,
+                name=name,
+                trace=task.result["data"].get("canonical_action_trace"),
+            )
+
+    store_task = _task("store-task", "web_action")
+    preferred = _task("preferred", "web_action")
+    legacy = _task("legacy", "web_action")
+    session = SimpleNamespace(
+        id="session",
+        browser_memory=BrowserMemory(last_success_task_id="preferred"),
+        metadata={"browser_last_success_task_id": "legacy"},
+    )
+    controller = AgentController(
+        parser=None,
+        task_manager=_FakeTaskManager({"store-task": store_task, "preferred": preferred, "legacy": legacy}),
+        tool_executor=None,
+        summarizer=None,
+        audit_logger=_FakeAuditLogger(),
+        session_store=_FakeSessionStore(session),
+        web_skill_generator=_FakeGenerator(),
+    )
+    namespace = ("sessions", "session", "web")
+    trace = {"schema_version": "opsagent.web_action_trace.v1", "status": "completed", "steps": []}
+    controller.langgraph_runtime.store.put(namespace, "context", {"last_success_task_id": "store-task"})
+    controller.langgraph_runtime.store.put(namespace, "trace:store-task", {"canonical_action_trace": trace})
+
+    result = controller.save_web_skill("session", name="skill")
+
+    assert result.task_id == "store-task"
+    assert result.name == "skill"
+    assert result.trace == trace

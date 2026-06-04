@@ -1,5 +1,10 @@
+from types import SimpleNamespace
+
+from langgraph.checkpoint.memory import InMemorySaver
+
 from aiops_agent.audit.logger import FileAuditLogger
 from aiops_agent.browser.agent import BrowserAgentTool
+from aiops_agent.browser.skills import WebSkillMatcher, WebSkillStore
 from aiops_agent.agent.summarizer import ResultSummarizer
 from aiops_agent.browser.models import ActionResult, BrowserAction, BrowserObservation, BrowserTaskSpec, InteractiveElement
 from aiops_agent.tasks.models import Task
@@ -30,6 +35,29 @@ SITE_CONFIG = {
         },
     },
 }
+
+
+def test_browser_agent_uses_fixed_web_subgraph_nodes(tmp_path):
+    tool = BrowserAgentTool(audit_logger=FileAuditLogger(tmp_path / "audit.jsonl"), artifact_root=tmp_path / "artifacts")
+
+    nodes = set(tool.subgraph.graph.nodes)
+
+    assert tool.subgraph.graph.name == "web_agent"
+    assert tool.subgraph.graph.checkpointer is False
+    assert {
+        "prepare_spec",
+        "load_web_memory",
+        "restore_browser_context",
+        "plan_action",
+        "stabilize_action",
+        "risk_gate",
+        "execute_action",
+        "observe_page",
+        "reflect",
+        "route_next",
+        "skill_fallback",
+        "finalize",
+    }.issubset(nodes)
 
 
 class WorkflowFakeBrowser:
@@ -65,6 +93,211 @@ class WorkflowFakeBrowser:
 
     def close(self):
         return None
+
+
+class SkillFallbackFakeBrowser:
+    close_calls = 0
+    executed = []
+
+    def __init__(self, *args, **kwargs):
+        self.session_state_path = kwargs.get("session_state_path")
+        self.current = BrowserObservation(url="http://example.test", title="Skill", page_type="form")
+
+    def execute(self, action):
+        SkillFallbackFakeBrowser.executed.append(action)
+        if action.target_hint == "broken":
+            return ActionResult("terminal_failure", self.current, error="broken skill action")
+        return ActionResult("success", self.current)
+
+    def observe(self, *, last_action_result="", force_artifact=False):
+        self.current.last_action_result = last_action_result
+        return self.current
+
+    def save_session_state(self):
+        return str(self.session_state_path) if self.session_state_path else None
+
+    def close(self):
+        SkillFallbackFakeBrowser.close_calls += 1
+
+
+class FlakyRetryFakeBrowser:
+    executed = []
+
+    def __init__(self, *args, **kwargs):
+        self.session_state_path = kwargs.get("session_state_path")
+        self.current = BrowserObservation(url="", title="Retry", page_type="unknown")
+
+    def execute(self, action):
+        FlakyRetryFakeBrowser.executed.append(action)
+        if action.type == "open_url" and len([item for item in FlakyRetryFakeBrowser.executed if item.type == "open_url"]) == 1:
+            self.current = BrowserObservation(url=action.value or "", title="Retry", page_type="unknown")
+            return ActionResult("retryable_failure", self.current, error="Timeout waiting for navigation")
+        if action.type == "open_url":
+            self.current = BrowserObservation(url=action.value or "", title="Retry", page_type="form")
+            return ActionResult("success", self.current)
+        if action.type == "finish":
+            return ActionResult("success", self.current)
+        return ActionResult("terminal_failure", self.current, error=f"unexpected {action.type}")
+
+    def observe(self, *, last_action_result="", force_artifact=False):
+        self.current.last_action_result = last_action_result
+        return self.current
+
+    def save_session_state(self):
+        return str(self.session_state_path) if self.session_state_path else None
+
+    def close(self):
+        return None
+
+
+class FallbackPlanner:
+    def next_action(self, spec, observation, steps):
+        return BrowserAction(type="finish", expected_outcome="fallback completed")
+
+
+def test_web_subgraph_falls_back_from_failed_skill_to_planner(tmp_path, monkeypatch):
+    SkillFallbackFakeBrowser.close_calls = 0
+    SkillFallbackFakeBrowser.executed = []
+    monkeypatch.setattr("aiops_agent.browser.agent.PlaywrightBrowserTool", SkillFallbackFakeBrowser)
+    tool = BrowserAgentTool(
+        audit_logger=FileAuditLogger(tmp_path / "audit.jsonl"),
+        artifact_root=tmp_path / "artifacts",
+        planner=FallbackPlanner(),
+    )
+
+    result = tool.execute(
+        {
+            "trace_id": "trace",
+            "task_id": "task",
+            "session_id": "session",
+            "start_url": "http://example.test",
+            "user_goal": "点击 broken",
+            "auto_plan": False,
+            "actions": [{"type": "click", "target_hint": "broken"}],
+            "skill_name": "demo-broken-skill",
+            "skill_fallback_to_llm_once": True,
+            "max_steps": 4,
+        }
+    )
+
+    assert result.success is True
+    assert result.data["status"] == "completed"
+    assert result.data["skill_fallback"]["skill_name"] == "demo-broken-skill"
+    assert result.data["skill_fallback"]["llm_fallback_used"] is True
+    assert any(action.target_hint == "broken" for action in SkillFallbackFakeBrowser.executed)
+    assert any(action.type == "finish" for action in SkillFallbackFakeBrowser.executed)
+    assert SkillFallbackFakeBrowser.close_calls >= 2
+
+
+def test_web_subgraph_retries_transient_read_action_without_polluting_steps(tmp_path, monkeypatch):
+    FlakyRetryFakeBrowser.executed = []
+    monkeypatch.setattr("aiops_agent.browser.agent.PlaywrightBrowserTool", FlakyRetryFakeBrowser)
+    tool = BrowserAgentTool(audit_logger=FileAuditLogger(tmp_path / "audit.jsonl"), artifact_root=tmp_path / "artifacts")
+
+    result = tool.execute(
+        {
+            "trace_id": "trace",
+            "task_id": "task",
+            "session_id": "session",
+            "start_url": "http://example.test",
+            "user_goal": "打开页面后结束",
+            "auto_plan": False,
+            "actions": [
+                {"type": "open_url", "value": "http://example.test"},
+                {"type": "finish", "expected_outcome": "done"},
+            ],
+            "max_steps": 4,
+        }
+    )
+
+    assert result.success is True
+    assert [action.type for action in FlakyRetryFakeBrowser.executed].count("open_url") == 2
+    open_url_steps = [step for step in result.data["steps"] if step["action"]["type"] == "open_url"]
+    assert len(open_url_steps) == 1
+    assert open_url_steps[0]["reflection"]["retry_attempts"] == 1
+
+
+def test_web_subgraph_checkpoints_do_not_store_login_secrets(tmp_path, monkeypatch):
+    class _CredentialStore:
+        def get(self, ref):
+            return SimpleNamespace(username="alice-secret-user", password="super-secret-password")
+
+    WorkflowFakeBrowser.executed = []
+    monkeypatch.setattr("aiops_agent.browser.agent.PlaywrightBrowserTool", WorkflowFakeBrowser)
+    tool = BrowserAgentTool(
+        audit_logger=FileAuditLogger(tmp_path / "audit.jsonl"),
+        artifact_root=tmp_path / "artifacts",
+        credential_store=_CredentialStore(),
+        langgraph_checkpointer=InMemorySaver(),
+    )
+
+    result = tool.execute(
+        {
+            "trace_id": "trace",
+            "task_id": "task",
+            "session_id": "session",
+            "user_goal": "登录后结束",
+            "requires_login": True,
+            "credential_ref": "demo",
+            "auto_plan": False,
+            "actions": [{"type": "finish", "expected_outcome": "done"}],
+            "max_steps": 2,
+        }
+    )
+
+    checkpoints = [snapshot.values for snapshot in tool.get_state_history(result.data["web_thread_id"])]
+    checkpoint_text = repr(checkpoints)
+    assert "super-secret-password" not in checkpoint_text
+    assert "alice-secret-user" not in checkpoint_text
+
+
+def test_web_subgraph_matches_skill_inside_browser_tool(tmp_path, monkeypatch):
+    WorkflowFakeBrowser.executed = []
+    monkeypatch.setattr("aiops_agent.browser.agent.PlaywrightBrowserTool", WorkflowFakeBrowser)
+    store = WebSkillStore(tmp_path / "web_skills")
+    store.write(
+        name="demo-inline-skill",
+        frontmatter={
+            "name": "demo-inline-skill",
+            "description": "inline browser skill",
+            "compatibility": ["opsAgent web_action"],
+        },
+        body="inline skill",
+        workflow={
+            "schema_version": "opsagent.web_skill.workflow.v1",
+            "skill_name": "demo-inline-skill",
+            "site_key": "demo",
+            "inputs": [],
+            "match": {"keywords": ["执行 skill"], "fields": [], "answer_types": []},
+            "execution": {"auto_plan": False, "requires_login": False, "fallback_to_llm_once": True},
+            "actions": [{"type": "finish", "expected_outcome": "done"}],
+        },
+        notes="notes",
+    )
+    tool = BrowserAgentTool(
+        audit_logger=FileAuditLogger(tmp_path / "audit.jsonl"),
+        artifact_root=tmp_path / "artifacts",
+        web_skill_matcher=WebSkillMatcher(store),
+    )
+
+    result = tool.execute(
+        {
+            "trace_id": "trace",
+            "task_id": "task",
+            "session_id": "session",
+            "start_url": "http://example.test",
+            "user_goal": "执行 skill",
+            "site_key": "demo",
+            "auto_plan": True,
+            "actions": [],
+            "max_steps": 4,
+        }
+    )
+
+    assert result.success is True
+    assert result.data["skill_execution"]["skill_name"] == "demo-inline-skill"
+    assert result.data["skill_execution"]["score"] >= 0.75
+    assert WorkflowFakeBrowser.executed[0].type == "finish"
 
 
 class EarlyStopFakeBrowser:
@@ -160,6 +393,7 @@ def test_workflow_blocks_before_each_remote_mutation_and_replays_safe_actions(tm
     assert first.data["status"] == "awaiting_confirmation"
     assert first.data["pending_action_raw"]["key"] == "create_user.submit"
     assert any(action["type"] == "type" and action["value"] == "alice" for action in first.data["replay_actions"])
+    assert "create_user.submit" not in [action.key for action in WorkflowFakeBrowser.executed]
 
     second = tool.execute(
         {
@@ -226,6 +460,10 @@ def test_search_user_workflow_is_read_only_and_completes(tmp_path, monkeypatch):
     assert ("search_user.submit", "click", "查询", None) in executed
     assert all("reflection" in step for step in result.data["steps"])
     assert all(step["reflection"]["next_decision"] == "continue" for step in result.data["steps"])
+    trace = result.data["canonical_action_trace"]
+    assert trace["schema_version"] == "opsagent.web_action_trace.v1"
+    assert trace["status"] == "completed"
+    assert trace["step_count"] == len(result.data["steps"])
 
 
 def test_browser_agent_stops_early_when_menu_is_missing(tmp_path, monkeypatch):

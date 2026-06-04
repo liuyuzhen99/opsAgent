@@ -5,6 +5,7 @@ from collections import OrderedDict
 from datetime import UTC, datetime
 from typing import Any
 
+from aiops_agent.browser.action_trace import legacy_steps_from_canonical_trace
 from aiops_agent.browser.skills.models import WebSkillGenerationError, WebSkillSaveResult
 from aiops_agent.browser.skills.store import WebSkillStore
 from aiops_agent.browser.skills.validator import validate_description, validate_skill_name
@@ -47,13 +48,13 @@ class WebSkillGenerator:
 
     def generate_from_task(self, task: Task, name: str | None = None) -> WebSkillSaveResult:
         data = (task.result or {}).get("data") or {}
-        steps = data.get("steps") or []
+        steps = self._source_steps(data)
         if task.intent != "web_action":
             raise WebSkillGenerationError("最近一次成功任务不是 web_action。")
         if task.status != "success" or data.get("status") != "completed":
             raise WebSkillGenerationError("最近一次 web_action 未成功完成，不能沉淀 skill。")
         if not isinstance(steps, list) or not steps:
-            raise WebSkillGenerationError("成功任务缺少 result.data.steps，不能沉淀 skill。")
+            raise WebSkillGenerationError("成功任务缺少 canonical_action_trace 或 result.data.steps，不能沉淀 skill。")
         self._validate_reflections(steps)
         self._validate_answer_contract(task, data)
 
@@ -124,6 +125,14 @@ class WebSkillGenerator:
             matched_keywords=keywords,
             parameterization_decisions=parameterization_decisions,
         )
+
+    def _source_steps(self, data: dict[str, Any]) -> list[dict[str, Any]]:
+        canonical = data.get("canonical_action_trace") or {}
+        steps = legacy_steps_from_canonical_trace(canonical)
+        if steps:
+            return steps
+        raw_steps = data.get("steps") or []
+        return raw_steps if isinstance(raw_steps, list) else []
 
     def _validate_reflections(self, steps: list[dict[str, Any]]) -> None:
         for step in steps:
