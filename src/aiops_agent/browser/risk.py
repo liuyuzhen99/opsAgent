@@ -32,6 +32,8 @@ class RiskEvaluator:
             return "safe_read"
         if action.type == "login_submit":
             return "safe_local_edit"
+        if action.type == "hover":
+            return "safe_local_edit"
         if action.type == "press":
             return "safe_local_edit"
         if action.type == "click" and self._looks_like_date_field(action):

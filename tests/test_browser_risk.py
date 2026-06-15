@@ -38,6 +38,18 @@ def test_press_escape_is_safe_even_when_expected_outcome_mentions_remove_overlay
     assert evaluator.requires_confirmation(action) is False
 
 
+def test_hover_is_safe_local_interaction():
+    evaluator = RiskEvaluator()
+    action = BrowserAction(
+        type="hover",
+        target_hint="删除菜单",
+        expected_outcome="展开更多操作菜单",
+    )
+
+    assert evaluator.classify(action) == "safe_local_edit"
+    assert evaluator.requires_confirmation(action) is False
+
+
 def test_create_date_field_input_is_not_treated_as_remote_mutation():
     evaluator = RiskEvaluator()
     action = BrowserAction(

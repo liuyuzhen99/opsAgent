@@ -8,6 +8,8 @@ from aiops_agent.tools.base import ToolError
 
 @dataclass(slots=True)
 class ToolDefinition:
+    # 这里保存的是工具目录元数据，不是强 schema/capability manifest。
+    # 当前 executor 不会根据 risk_level/timeout_seconds 做统一拦截。
     name: str
     tool: object
     risk_level: str = "read_only"
@@ -53,4 +55,6 @@ class ToolRegistry:
         else:
             spec = ToolCallSpec(tool_name=tool_or_spec, action="execute", params=params or {})
         definition = self.get(spec.tool_name)
+        # 轻量调用边界：真正的 input schema、权限、timeout 目前由上游 planner/policy
+        # 或具体 tool 自己处理；registry 只负责按名字找到 tool 并调用 execute(params)。
         return definition.tool.execute(spec.params)

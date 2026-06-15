@@ -72,6 +72,7 @@ def test_llm_planner_output_rejects_unknown_action_and_bad_shape():
     for payload in (
         {"type": "eval_js", "value": "alert(1)"},
         {"type": "type", "value": "alice"},
+        {"type": "hover"},
         {"type": "open_url", "value": "/relative"},
     ):
         try:
@@ -85,6 +86,12 @@ def test_llm_planner_output_rejects_unknown_action_and_bad_shape():
     ).to_action()
     assert action.type == "type"
     assert action.value == "alice"
+
+    hover_action = BrowserPlannerOutput.model_validate(
+        {"type": "hover", "target_hint": "更多操作"}
+    ).to_action()
+    assert hover_action.type == "hover"
+    assert hover_action.target_hint == "更多操作"
 
 
 def test_llm_planner_decision_accepts_react_thought_and_action():

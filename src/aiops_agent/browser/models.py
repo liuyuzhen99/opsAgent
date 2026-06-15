@@ -1,9 +1,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal, TypeAlias
 
 
+BrowserActionType: TypeAlias = Literal[
+    "open_url",
+    "click",
+    "hover",
+    "type",
+    "type_username",
+    "type_password",
+    "login_submit",
+    "select",
+    "press",
+    "wait_for",
+    "observe_page",
+    "extract_text",
+    "save_artifact",
+    "finish",
+]
 RiskLevel = str
 TaskState = str
 ActionResultStatus = str
@@ -27,7 +43,7 @@ class InteractiveElement:
 
 @dataclass(slots=True)
 class BrowserAction:
-    type: str
+    type: BrowserActionType
     target_hint: str = ""
     target_id: str | None = None
     value: str | None = None

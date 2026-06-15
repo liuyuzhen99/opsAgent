@@ -315,6 +315,8 @@ class AgentController:
         result_data = (task.result or {}).get("data") or {}
         pending_action = result_data.get("pending_action_raw")
         confirmation_type = result_data.get("confirmation_type") or (result_data.get("confirmation") or {}).get("type")
+        # Web 动作确认：优先走 LangGraph interrupt/resume；没有可恢复 interrupt 时，
+        # 再退回旧逻辑，把 pending_action 注回 browser_agent 工具调用。
         if pending_action:
             if self._has_resumable_interrupt(task.id):
                 return self._resume_browser_confirmation(task, result_data, decision, progress_callback)
@@ -323,6 +325,7 @@ class AgentController:
                 return self._finalize_confirmed_task(task, progress_callback)
             return self._confirm_browser_action(task, result_data, progress_callback)
 
+        # Plan 级确认没有具体 pending_action，恢复点在主图 policy_check。
         if decision != "approved":
             if confirmation_type == "plan":
                 return self._resume_plan_confirmation(task, result_data, decision, progress_callback)
@@ -342,6 +345,7 @@ class AgentController:
         progress_callback: Callable[[ProgressEvent], None] | None,
     ) -> Task:
         if not self._has_resumable_interrupt(task.id):
+            # 兼容旧任务：没有 checkpoint interrupt 时，按 task.result 里的 pending_tool_calls 恢复。
             if decision != "approved":
                 self._reject_confirmation_task(task, decision)
                 return self._finalize_confirmed_task(task, progress_callback)
@@ -375,6 +379,7 @@ class AgentController:
             snapshot = self.get_state(task_id)
         except Exception:
             return False
+        # LangGraph checkpoint 中还有 interrupts，才说明可以用 Command(resume=...) 原地续跑。
         return bool(getattr(snapshot, "interrupts", None))
 
     def _reject_confirmation_task(self, task: Task, decision: str) -> None:
@@ -399,6 +404,7 @@ class AgentController:
         self._runtime_context.trace_id = task.trace_id
         try:
             result = self.graph.invoke(
+                # 先恢复主图 interrupt；主图 route_execution 再把确认传递给 Web 子图 risk_gate。
                 Command(resume={"decision": decision}),
                 config=self._graph_config(task.id, task.session_id),
             )
@@ -459,10 +465,14 @@ class AgentController:
 
         call_spec = task.tool_calls[0]
         call_spec.params = dict(call_spec.params)
+        # 把确认前保存的 payload 还原成浏览器工具参数：
+        # confirmed_action 是本次真正要执行的危险动作；replay_actions 只用于重建安全页面上下文。
         call_spec.params["confirmed_action"] = pending_action
         call_spec.params["replay_actions"] = result_data.get("replay_actions") or []
         call_spec.params["prior_steps"] = result_data.get("steps") or []
+        # 已完成的 mutation key 会传回 planner，避免确认后再次提出同一个提交动作。
         call_spec.params["completed_action_keys"] = result_data.get("completed_action_keys") or []
+        # 确认后不再把任务整体当作“需要远端变更确认”，只执行这一条已确认 action。
         call_spec.params["requires_remote_mutation"] = False
         call_spec.params["start_url"] = result_data.get("resume_url") or call_spec.params.get("start_url")
         call_spec.params["session_state_path"] = result_data.get("session_state_path") or call_spec.params.get("session_state_path")
@@ -1407,6 +1417,7 @@ class AgentController:
                 task.artifacts.extend(tool_result.artifacts)
             self._emit_domain_tool_events(task, tool_result, state.get("progress_callback"))
             result_status = (tool_result.data or {}).get("status")
+            # ToolResult 是工具边界的统一协议；Controller 在这里把它映射成 task 生命周期状态。
             if tool_result.success:
                 self.task_manager.mark_success(task, tool_result.to_dict())
             elif result_status == "awaiting_confirmation":
@@ -1866,6 +1877,8 @@ class AgentController:
                 )
             )
 
+        # 当前记忆压缩/同步不再走 ContextCompressor：
+        # legacy session 字段和 LangGraph Store 都在这里同步。
         self._sync_legacy_session_and_store(session, task)
         self.task_manager.persist(task)
         self.session_store.save(session)

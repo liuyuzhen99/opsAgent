@@ -58,17 +58,24 @@ class WebAgentSubgraphState(TypedDict, total=False):
 
 class WebAgentSubgraph:
     def __init__(self, host, *, checkpointer=None, store=None):
+        # host 是外层 BrowserAgentTool。子图只负责 LangGraph 编排；
+        # 创建浏览器、风险判断、审计、artifact 等领域能力都回调给 host。
         self.host = host
         self.checkpointer = checkpointer
         self.store = store
         self.graph = self._build_graph()
+        # 进程内运行态：保存 Playwright tool、steps、artifacts 等不适合进 checkpoint 的对象。
+        # 进程重启后这里会丢失，所以 resume 时还要能从 checkpoint + storage_state 重建。
         self._contexts: dict[str, dict[str, Any]] = {}
 
     def run(self, params: dict) -> ToolExecutionResult:
+        # 每次 Web 执行都有一个 run_id；后续 interrupt payload、内存上下文和恢复逻辑都靠它串起来。
         run_id = str(params.get("web_run_id") or uuid4())
         params = dict(params)
         params["web_run_id"] = run_id
         self._contexts[run_id] = {"params": params, "steps": [], "artifacts": []}
+        # interrupted=True 表示图停在人工确认点，此时不能清理 _contexts，
+        # 因为 live resume 还要复用原浏览器页面。
         interrupted = False
         try:
             state = self.graph.invoke(
@@ -78,11 +85,13 @@ class WebAgentSubgraph:
             state = self._runtime_state(state) if isinstance(state, dict) else state
             if state.get("__interrupt__"):
                 interrupted = True
+                # 把 LangGraph interrupt 转成 ToolExecutionResult(status=awaiting_confirmation)。
                 return self._interrupted_result(state)
             return state["result"]
         except Exception as exc:
             return self._failed_result(run_id, exc)
         finally:
+            # 正常完成或失败都释放进程内上下文；只有等待人工确认时保留。
             if not interrupted:
                 self._contexts.pop(run_id, None)
 
@@ -96,10 +105,12 @@ class WebAgentSubgraph:
                 data={"status": "failed"},
             )
         run_id = str(params.get("web_run_id") or thread_id.rsplit(":", 1)[-1])
+        # resume 前先恢复运行上下文：优先复用活浏览器；没有就用 checkpoint/spec 和 storage_state 新建。
         self._restore_context_for_resume(run_id, thread_id, params)
         interrupted = False
         try:
             state = self.graph.invoke(
+                # LangGraph 会把这个 resume 值交还给之前 interrupt(payload) 的位置。
                 Command(resume={"decision": params.get("confirmation_decision") or "approved"}),
                 config=self._graph_config(thread_id),
             )
@@ -282,6 +293,8 @@ class WebAgentSubgraph:
         session_id = state["session_id"]
         task_id = state["task_id"]
         active_key = self.host._active_tool_key(session_id, task_id)
+        # confirmed_action 说明这是确认后的恢复路径。若 _active_tools 还能找到 tool，
+        # 就是同进程 live resume；否则说明进程/对象已丢失，需要重新创建浏览器上下文。
         tool = self.host._active_tools.get(active_key) if spec.confirmed_action else None
         live_resume = tool is not None
         if tool is None:
@@ -296,6 +309,7 @@ class WebAgentSubgraph:
                 browser_channel=spec.browser_channel,
                 slow_mo_ms=spec.browser_slow_mo_ms,
             )
+        # live resume 保留确认前已经执行过的 steps；crash resume 依赖 checkpoint/params 重新推进。
         steps = list(params.get("prior_steps") or []) if live_resume else []
         artifacts: list[TaskArtifact] = []
         self.host._record("browser.started", state["trace_id"], task_id, session_id, 0, {"start_url": spec.start_url})
@@ -373,6 +387,7 @@ class WebAgentSubgraph:
         tool = self._tool(state)
         proposed_action = state["action"]
         runtime_action = self.host._runtime_action(proposed_action)
+        # 每个动作执行前都重新分类风险；unsafe/unknown 会被标记 requires_confirmation。
         self.host._prepare_runtime_action_for_risk(spec, proposed_action, runtime_action)
         self.host._record_action_proposed(
             action=proposed_action,
@@ -405,6 +420,7 @@ class WebAgentSubgraph:
                 keep_browser_open=True,
                 interrupt_payload=payload,
             )
+            # 这里真正暂停 LangGraph。payload 同时给人看确认摘要，也给 resume 用来恢复上下文。
             resume_value = interrupt(payload)
             if self._confirmation_decision(resume_value) != "approved":
                 blocked = ToolExecutionResult(
@@ -425,6 +441,7 @@ class WebAgentSubgraph:
                     artifacts=artifacts,
                 )
                 return {"result": blocked, "keep_browser_open": False, "route": "finalize"}
+            # 确认后只放行当前 pending action，一次性清掉确认标记，避免同一动作反复卡确认。
             proposed_action.requires_confirmation = False
             runtime_action.requires_confirmation = False
             return {
@@ -744,10 +761,12 @@ class WebAgentSubgraph:
         return normalized or "rejected"
 
     def _restore_context_for_resume(self, run_id: str, thread_id: str, params: dict) -> None:
+        # 如果同进程上下文还在，说明浏览器对象仍可直接使用，不需要从 checkpoint 重建。
         if run_id in self._contexts and self._contexts[run_id].get("tool") is not None:
             return
         values: dict[str, Any] = {}
         try:
+            # 进程重启后只能从 LangGraph checkpoint 读取可序列化 state。
             snapshot = self.graph.get_state(self._graph_config(thread_id))
             values = dict(getattr(snapshot, "values", {}) or {})
         except Exception:
@@ -767,6 +786,7 @@ class WebAgentSubgraph:
         active_key = str(values.get("active_key") or self.host._active_tool_key(session_id, task_id))
         tool = self.host._active_tools.get(active_key)
         if tool is None:
+            # crash resume: 重新创建 Playwright tool，并用 session_state_path 恢复 cookies/localStorage 等登录态。
             tool = self.host._create_browser_tool(
                 session_id=session_id,
                 task_id=task_id,

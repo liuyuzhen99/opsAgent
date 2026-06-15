@@ -1,28 +1,14 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import TypeAlias
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from aiops_agent.browser.models import BrowserAction
+from aiops_agent.browser.models import BrowserAction, BrowserActionType
 
 
-AllowedLLMAction = Literal[
-    "open_url",
-    "click",
-    "type",
-    "type_username",
-    "type_password",
-    "login_submit",
-    "select",
-    "press",
-    "wait_for",
-    "observe_page",
-    "extract_text",
-    "save_artifact",
-    "finish",
-]
+AllowedLLMAction: TypeAlias = BrowserActionType
 
 
 class BrowserPlannerOutput(BaseModel):
@@ -41,7 +27,8 @@ class BrowserPlannerOutput(BaseModel):
             parsed = urlparse(self.value or self.target_hint)
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 raise ValueError("open_url requires an absolute http(s) URL")
-        if self.type in {"click", "type", "type_username", "type_password", "login_submit", "select"} and not (self.target_hint or self.target_id):
+        targeted_actions = {"click", "hover", "type", "type_username", "type_password", "login_submit", "select"}
+        if self.type in targeted_actions and not (self.target_hint or self.target_id):
             raise ValueError(f"{self.type} requires target_hint or target_id")
         if self.type in {"type", "select"} and self.value is None:
             raise ValueError(f"{self.type} requires value")

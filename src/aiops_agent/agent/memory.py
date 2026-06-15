@@ -203,6 +203,8 @@ class LegacySessionMemoryWriter:
         self.summary_strategy = summary_strategy
 
     def sync(self, session: AgentSession, task: Task) -> AgentSession:
+        # 把完整 task 压成 session 内的短窗口记忆。完整事实仍在 task JSON，
+        # session 里只保留下一轮规划最常用的摘要、最近页面、QA 和索引。
         data = _task_data(task)
         entities = task.entities if isinstance(task.entities, dict) else {}
         report = self._safe_text(task.report)
@@ -351,6 +353,7 @@ class LegacySessionMemoryWriter:
             session.metadata["browser_last_success_site_key"] = browser.last_success_site_key
 
     def _rolling_summary(self, session: AgentSession) -> str:
+        # 规则摘要：不依赖 LLM，稳定地把短期任务、QA、页面和 web 成功任务压成一句话。
         recent_tasks = [
             f"{turn.intent}:{turn.status}"
             for turn in getattr(session, "short_term", [])[-5:]
@@ -383,6 +386,7 @@ class LegacySessionMemoryWriter:
         strategy = self.summary_strategy
         if strategy is not None:
             try:
+                # 可选 langmem/LLM 摘要。失败时静默降级到下面的规则摘要。
                 summary = strategy.summarize(session)
                 if summary:
                     return self._truncate(self._redact(summary), 1200)
@@ -495,6 +499,8 @@ class SessionMemoryManager:
         )
 
     def sync(self, session: AgentSession, task: Task) -> dict[str, Any]:
+        # LangGraph Store 里的结构化记忆：按 namespace 拆开 web/knowledge/task_index，
+        # 方便下一轮按 intent/query 检索，而不是只依赖 session.summary。
         migrated = self.migrator.migrate(self.store, session)
         namespaces: list[tuple[str, ...]] = []
         if task.intent == "web_action" or getattr(session, "browser_memory", None):
@@ -520,6 +526,8 @@ class SessionMemoryManager:
         limit: int = 5,
         fallback: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        # 规划前调用：把 Store 中的结构化上下文合并回 session_memory，
+        # planner 再据此恢复浏览器 state_path、最近 QA 或历史任务匹配。
         self.migrator.migrate(self.store, session)
         self._refresh_contexts_from_session(session, intent)
         memory = dict(fallback or {})

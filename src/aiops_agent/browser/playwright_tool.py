@@ -101,6 +101,8 @@ class PlaywrightBrowserTool:
             return None
         self.session_state_path.parent.mkdir(parents=True, exist_ok=True)
         try:
+            # Playwright storage_state 主要保存 cookies/localStorage 等登录态；
+            # 它不是页面 DOM/弹窗/未提交表单的完整快照。
             self._context.storage_state(path=str(self.session_state_path))
         except Exception:
             return None
@@ -141,6 +143,8 @@ class PlaywrightBrowserTool:
             locator = self._resolve_locator(page, action)
             if action.type == "click":
                 self._click_with_popup_fallback(page, action, locator)
+            elif action.type == "hover":
+                locator.hover(timeout=action.timeout_ms)
             elif action.type == "type":
                 if self._is_date_type_action(action):
                     self._set_date_field(page, action, locator)
@@ -235,6 +239,7 @@ class PlaywrightBrowserTool:
         self._browser = self._playwright.chromium.launch(**launch_kwargs)
         context_kwargs = {}
         if self.session_state_path and self.session_state_path.exists():
+            # crash resume 时用上次保存的 storage_state 创建新 context，尽量恢复登录会话。
             context_kwargs["storage_state"] = str(self.session_state_path)
         if self.video_enabled:
             context_kwargs["record_video_dir"] = str(self.artifact_dir / "video")

@@ -46,6 +46,7 @@ class BrowserAgentTool(BaseTool):
         self.subgraph = WebAgentSubgraph(self, checkpointer=langgraph_checkpointer, store=langgraph_store)
 
     def execute(self, params: dict) -> ToolExecutionResult:
+        # web_thread_id 表示这是确认后的恢复调用；否则是一次新的 Web 任务。
         if params.get("web_thread_id"):
             return self.subgraph.resume(params)
         return self.subgraph.run(params)
@@ -87,6 +88,8 @@ class BrowserAgentTool(BaseTool):
         )
 
     def _spec_from_params(self, params: dict) -> BrowserTaskSpec:
+        # ToolCallSpec.params 是松散 dict，这里收束成 BrowserTaskSpec：
+        # 后续子图、planner、risk gate 都围绕这个结构化规格工作。
         actions = [BrowserAction(**item) for item in params.get("actions", [])]
         return BrowserTaskSpec(
             start_url=params.get("start_url"),
@@ -152,6 +155,8 @@ class BrowserAgentTool(BaseTool):
         spec.credential_password = credential.password
 
     def _next_action(self, spec: BrowserTaskSpec, steps: list[dict]) -> BrowserAction:
+        # 确认恢复时先重放安全动作，再执行唯一的 confirmed_action；
+        # confirmed_action 已成功出现在 steps 里时，不再重复提交。
         if spec.confirmed_action and len(steps) < len(spec.replay_actions):
             return spec.replay_actions[len(steps)]
         if spec.confirmed_action and not self._action_already_executed(spec.confirmed_action, steps):
@@ -352,8 +357,11 @@ class BrowserAgentTool(BaseTool):
                 "status": "awaiting_confirmation",
                 "confirmation_summary": self._confirmation_summary(action, observation),
                 "pending_action": self._safe_action_dict(action),
+                # raw action 给 resume 执行用；safe action 给人和审计看。
                 "pending_action_raw": asdict(action),
+                # crash resume 时只重放安全动作，远端 mutation 不进入 replay。
                 "replay_actions": [asdict(action) for action in self._replay_actions(steps)],
+                # 已成功 mutation 的 key 用来防止后续 planner 再提出同一提交。
                 "completed_action_keys": self._completed_action_keys(steps),
                 "resume_url": observation.url,
                 "session_state_path": state_path,
@@ -1046,6 +1054,7 @@ class BrowserAgentTool(BaseTool):
         return payload
 
     def _replay_actions(self, steps: list[dict]) -> list[BrowserAction]:
+        # 只保留可安全重建页面上下文的动作；登录 secret 和远端副作用动作都不能重放。
         replay: list[BrowserAction] = []
         for step in steps:
             if step.get("result") != "success":
@@ -1059,11 +1068,12 @@ class BrowserAgentTool(BaseTool):
                 continue
             if action.risk_level in {"unsafe_mutation", "unknown_risk"} or action.requires_confirmation:
                 continue
-            if action.type in {"open_url", "click", "type", "select", "wait_for"}:
+            if action.type in {"open_url", "click", "hover", "type", "select", "wait_for"}:
                 replay.append(action)
         return replay
 
     def _completed_action_keys(self, steps: list[dict]) -> list[str]:
+        # 只记录已经成功的 unsafe mutation key。恢复后 planner 用这些 key 跳过重复提交。
         keys: list[str] = []
         for step in steps:
             if step.get("result") != "success":
