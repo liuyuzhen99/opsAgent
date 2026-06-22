@@ -21,6 +21,7 @@ from aiops_agent.agent.state_codec import session_from_state, session_to_state, 
 from aiops_agent.browser.skills import (
     WebSkillGenerationError,
     WebSkillGenerator,
+    WebSkillInvocationService,
     WebSkillSaveResult,
     WebSkillValidationError,
 )
@@ -71,6 +72,10 @@ class AgentController:
         browser_sites_config: BrowserSitesConfig | None = None,
         web_skill_generator: WebSkillGenerator | None = None,
         credential_ref_resolver: Callable[[str], str | None] | None = None,
+        credential_ref_detector: Callable[[str], str | None] | None = None,
+        credential_user_resolver: Callable[[str | None], str | None] | None = None,
+        credential_ref_for_site_user: Callable[[str | None, str | None], str | None] | None = None,
+        credential_site_resolver: Callable[[str | None], str | None] | None = None,
         langgraph_runtime: LangGraphRuntime | None = None,
         langgraph_runtime_config: LangGraphRuntimeConfig | None = None,
         session_memory_manager: SessionMemoryManager | None = None,
@@ -89,6 +94,10 @@ class AgentController:
         self.browser_sites_config = browser_sites_config or BrowserSitesConfig()
         self.web_skill_generator = web_skill_generator
         self.credential_ref_resolver = credential_ref_resolver
+        self.credential_ref_detector = credential_ref_detector
+        self.credential_user_resolver = credential_user_resolver
+        self.credential_ref_for_site_user = credential_ref_for_site_user
+        self.credential_site_resolver = credential_site_resolver
         self.langgraph_runtime = langgraph_runtime or LangGraphRuntime.from_config(langgraph_runtime_config)
         self.session_memory_manager = session_memory_manager or SessionMemoryManager(self.langgraph_runtime.store)
         self.knowledge_subgraph = KnowledgeSubgraph(self.tool_executor, self.langgraph_runtime)
@@ -126,10 +135,18 @@ class AgentController:
         browser_slow_mo_ms: int = 0,
         progress_callback: Callable[[ProgressEvent], None] | None = None,
     ) -> Task:
-        completed_task_id: str | None = None
-        last_task_id: str | None = None
-        for event in self.stream_run(
+        task_id: str | None = None
+
+        def publish(event: ProgressEvent) -> None:
+            nonlocal task_id
+            if event.task_id:
+                task_id = event.task_id
+            if progress_callback is not None:
+                progress_callback(event)
+
+        result = self._run_graph(
             task_input,
+            trace_id=get_trace_id(),
             session_id=session_id,
             llm_profile=llm_profile,
             max_steps=max_steps,
@@ -141,21 +158,17 @@ class AgentController:
             browser_site=browser_site,
             browser_channel=browser_channel,
             browser_slow_mo_ms=browser_slow_mo_ms,
-        ):
-            if event.task_id:
-                last_task_id = event.task_id
-            if event.stage == "task.completed":
-                completed_task_id = event.task_id
-            if progress_callback is not None:
-                progress_callback(event)
-
-        task_id = completed_task_id or last_task_id
-        if not task_id:
-            raise RuntimeError("任务流结束但没有产生 task_id")
-        task = self.task_manager.load(task_id)
+            progress_callback=publish,
+        )
+        result = self._runtime_state(result) if isinstance(result, dict) else result
+        task = result.get("task") if isinstance(result, dict) else None
+        if not isinstance(task, Task):
+            if not task_id:
+                raise RuntimeError("任务流结束但没有产生 task_id")
+            task = self.task_manager.load(task_id)
         if task is None:
-            raise RuntimeError(f"任务流结束但无法加载任务: {task_id}")
-        return task
+            raise RuntimeError(f"任务流结束但无法加载任务: {task_id or '-'}")
+        return self.task_manager.load(task.id) or task
 
     def stream_run(
         self,
@@ -597,7 +610,13 @@ class AgentController:
         if fallback_result is not None:
             tool_result = fallback_result
             task.artifacts.extend(tool_result.artifacts)
-        self._emit_domain_tool_events(task, tool_result, progress_callback)
+        prior_step_count = len(call_spec.params.get("prior_steps") or [])
+        self._emit_domain_tool_events(
+            task,
+            tool_result,
+            progress_callback,
+            web_step_offset=prior_step_count,
+        )
         result_status = (tool_result.data or {}).get("status")
         if tool_result.success:
             self.task_manager.mark_success(task, tool_result.to_dict())
@@ -760,6 +779,180 @@ class AgentController:
         except (WebSkillGenerationError, WebSkillValidationError) as exc:
             raise ValueError(str(exc)) from exc
 
+    def list_web_skills(self) -> list[dict]:
+        service = self._web_skill_invocation_service()
+        if service is None:
+            return []
+        return service.list_skills()
+
+    def delete_web_skill(self, name: str):
+        generator = self.web_skill_generator or WebSkillGenerator()
+        store = getattr(generator, "store", None)
+        if store is None:
+            raise ValueError("当前没有可用的 web skill store。")
+        try:
+            return store.delete(name)
+        except WebSkillValidationError as exc:
+            raise ValueError(str(exc)) from exc
+
+    def rename_web_skill(self, old_name: str, new_name: str):
+        generator = self.web_skill_generator or WebSkillGenerator()
+        store = getattr(generator, "store", None)
+        if store is None:
+            raise ValueError("当前没有可用的 web skill store。")
+        try:
+            return store.rename(old_name, new_name)
+        except WebSkillValidationError as exc:
+            raise ValueError(str(exc)) from exc
+
+    def run_web_skill(
+        self,
+        skill_name: str,
+        parameters: dict[str, str],
+        *,
+        session_id: str | None = None,
+        llm_profile: str | None = None,
+        max_steps: int = 20,
+        require_confirmation: bool = False,
+        allowed_domains: list[str] | None = None,
+        credential_ref: str | None = None,
+        browser_trace: bool = False,
+        browser_video: bool = False,
+        browser_site: str | None = None,
+        browser_channel: str | None = None,
+        browser_slow_mo_ms: int = 0,
+        progress_callback: Callable[[ProgressEvent], None] | None = None,
+    ) -> Task:
+        service = self._web_skill_invocation_service()
+        if service is None:
+            raise ValueError("当前没有可用的 web skill matcher。")
+        try:
+            invocation = service.prepare_invocation(
+                skill_name,
+                parameters,
+                max_steps=max_steps,
+                allowed_domains=allowed_domains or [],
+                credential_ref=credential_ref,
+                browser_trace=browser_trace,
+                browser_video=browser_video,
+                browser_site=browser_site,
+                browser_channel=browser_channel,
+                browser_slow_mo_ms=browser_slow_mo_ms,
+            )
+        except WebSkillValidationError as exc:
+            raise ValueError(str(exc)) from exc
+
+        trace_id = get_trace_id()
+        set_trace_id(trace_id)
+        self._runtime_context.progress_callback = progress_callback
+        self._runtime_context.trace_id = trace_id
+        try:
+            self._emit(
+                progress_callback,
+                ProgressEvent(
+                    stage="graph.started",
+                    message="LangGraph 主图已启动。",
+                    details={"trace_id": trace_id, "graph": "main", "node": "intake", "status": "started"},
+                ),
+            )
+            session = self.session_store.create_or_resume(session_id)
+            session_event = "session.resumed" if session.task_ids else "session.created"
+            self._emit(
+                progress_callback,
+                ProgressEvent(
+                    stage=session_event,
+                    message="已恢复会话。" if session.task_ids else "已创建会话。",
+                    session_id=session.id,
+                    details={"trace_id": trace_id, "graph": "main", "node": "intake"},
+                ),
+            )
+            task_input = invocation.task_input
+            task = self.task_manager.create_task(
+                task_input=task_input,
+                trace_id=trace_id,
+                session_id=session.id,
+                llm_profile=llm_profile,
+                max_steps=max_steps,
+                requires_explicit_confirmation=require_confirmation,
+            )
+            session.task_ids.append(task.id)
+            session.last_task_id = task.id
+            self._emit(
+                progress_callback,
+                ProgressEvent(
+                    stage="task.created",
+                    message="已创建任务。",
+                    task_id=task.id,
+                    session_id=session.id,
+                    details={"trace_id": trace_id, "graph": "main", "node": "intake"},
+                ),
+            )
+
+            browser_memory = getattr(session, "browser_memory", None)
+            risk_level = invocation.risk_level
+            task.intent = "web_action"
+            task.status = "planning"
+            task.current_stage = "planning"
+            task.entities = {
+                **invocation.entities,
+                "raw_text": task_input,
+                "workflow_fields": invocation.skill_parameters,
+                "skill_name": skill_name,
+            }
+            task.plan = invocation.plan
+            call_spec = invocation.call_spec
+            call_spec.params = dict(call_spec.params)
+            call_spec.params["session_state_path"] = getattr(browser_memory, "state_path", None)
+            task.tool_calls = [call_spec]
+            task.selected_tools = ["browser_agent"]
+            task.risk_level = risk_level
+            task.confirmation_required = False
+            self.task_manager.persist(task)
+            self._emit(
+                progress_callback,
+                ProgressEvent(
+                    stage="plan.generated",
+                    message="已生成计划，工具：browser_agent。",
+                    task_id=task.id,
+                    session_id=session.id,
+                    details={"risk_level": risk_level, "selected_tools": task.selected_tools},
+                ),
+            )
+            self._emit(
+                progress_callback,
+                ProgressEvent(
+                    stage="web.skill.matched",
+                    message=f"命中 web skill：{skill_name}。",
+                    task_id=task.id,
+                    session_id=session.id,
+                    details={"skill_name": skill_name, "score": 1.0, "parameters": invocation.skill_parameters},
+                ),
+            )
+            self._emit(
+                progress_callback,
+                ProgressEvent(
+                    stage="policy.checked",
+                    message=f"策略检查通过，风险等级：{risk_level}。",
+                    task_id=task.id,
+                    session_id=session.id,
+                    details={"risk_level": risk_level, "allowed": True},
+                ),
+            )
+
+            state = self._route_execution_node({"task": task, "session": session, "progress_callback": progress_callback})
+            state = self._summarize_node(state)
+            state = self._persist_audit_node(state)
+            completed_task = state.get("task")
+            if isinstance(completed_task, Task):
+                return self.task_manager.load(completed_task.id) or completed_task
+            loaded = self.task_manager.load(task.id)
+            if loaded is None:
+                raise RuntimeError(f"skill 执行结束但无法加载任务: {task.id}")
+            return loaded
+        finally:
+            self._runtime_context.progress_callback = None
+            self._runtime_context.trace_id = None
+
     def _web_skill_source_from_store(self, session_id: str) -> tuple[str | None, dict | None]:
         namespace = ("sessions", session_id, "web")
         context_item = self.langgraph_runtime.store.get(namespace, "context")
@@ -771,6 +964,35 @@ class AgentController:
         trace_value = trace_item.value if trace_item is not None and isinstance(trace_item.value, dict) else {}
         trace = trace_value.get("canonical_action_trace") if isinstance(trace_value.get("canonical_action_trace"), dict) else None
         return str(task_id), trace
+
+    def _web_skill_matcher(self):
+        try:
+            browser_tool = self._browser_agent_tool()
+        except Exception:
+            browser_tool = None
+        matcher = getattr(browser_tool, "web_skill_matcher", None) if browser_tool is not None else None
+        if matcher is not None:
+            return matcher
+        generator = self.web_skill_generator
+        store = getattr(generator, "store", None)
+        if store is None:
+            return None
+        from aiops_agent.browser.skills import WebSkillMatcher
+
+        return WebSkillMatcher(store)
+
+    def _web_skill_invocation_service(self) -> WebSkillInvocationService | None:
+        matcher = self._web_skill_matcher()
+        if matcher is None:
+            return None
+        return WebSkillInvocationService(
+            matcher,
+            browser_sites_config=self.browser_sites_config,
+            credential_ref_resolver=self._default_credential_ref,
+            credential_user_resolver=self._default_credential_user,
+            credential_ref_for_site_user=self._credential_ref_for_site_user,
+            credential_site_resolver=self._site_key_for_credential,
+        )
 
     def _build_graph(self):
         graph = StateGraph(OrchestrationState)
@@ -912,6 +1134,10 @@ class AgentController:
             task.entities["allowed_domains"] = sorted(set(existing_domains + state["allowed_domains"]))
         if state.get("credential_ref"):
             task.entities["credential_ref"] = state["credential_ref"]
+        if not task.entities.get("credential_ref"):
+            credential_ref = self._credential_ref_from_text(task.input)
+            if credential_ref:
+                task.entities["credential_ref"] = credential_ref
         if state.get("browser_trace"):
             task.entities["trace_enabled"] = True
         if state.get("browser_video"):
@@ -920,13 +1146,19 @@ class AgentController:
             task.entities["browser_channel"] = state["browser_channel"]
         if state.get("browser_slow_mo_ms"):
             task.entities["browser_slow_mo_ms"] = int(state["browser_slow_mo_ms"])
-        site_key = str(state["browser_site"]) if state.get("browser_site") else self._browser_site_key_from_text(task.input)
-        if site_key and (state.get("browser_site") or self._should_apply_browser_site(task)):
+        credential_site_key = self._site_key_for_credential(task.entities.get("credential_ref"))
+        apply_credential_site = bool(credential_site_key and (task.intent == "web_action" or self._has_web_navigation_cue(task.input)))
+        site_key = str(state["browser_site"]) if state.get("browser_site") else (credential_site_key if apply_credential_site else None) or self._browser_site_key_from_text(task.input)
+        if site_key and (state.get("browser_site") or apply_credential_site or self._should_apply_browser_site(task)):
             self._apply_browser_site(task, site_key)
         if task.intent == "web_action" and task.entities.get("site_key") and not task.entities.get("credential_ref"):
             credential_ref = self._default_credential_ref(str(task.entities["site_key"]))
             if credential_ref:
                 task.entities["credential_ref"] = credential_ref
+        if task.intent == "web_action":
+            enrich = getattr(self.parser, "enrich_web_action_entities", None)
+            if callable(enrich):
+                task.entities = enrich(task.input, task.entities)
         task.current_stage = "planning"
         task.status = "planning"
         self.audit_logger.record(
@@ -1016,6 +1248,26 @@ class AgentController:
         if self.credential_ref_resolver is None:
             return None
         return self.credential_ref_resolver(site_key)
+
+    def _default_credential_user(self, site_key: str | None) -> str | None:
+        if self.credential_user_resolver is None:
+            return None
+        return self.credential_user_resolver(site_key)
+
+    def _credential_ref_for_site_user(self, site_key: str | None, user: str | None) -> str | None:
+        if self.credential_ref_for_site_user is None:
+            return None
+        return self.credential_ref_for_site_user(site_key, user)
+
+    def _credential_ref_from_text(self, text: str) -> str | None:
+        if self.credential_ref_detector is None:
+            return None
+        return self.credential_ref_detector(text)
+
+    def _site_key_for_credential(self, credential_ref: str | None) -> str | None:
+        if self.credential_site_resolver is None:
+            return None
+        return self.credential_site_resolver(credential_ref)
 
     def _task_plan_node(self, state: OrchestrationState) -> OrchestrationState:
         task = state["task"]
@@ -1599,10 +1851,17 @@ class AgentController:
         task: Task,
         tool_result: ToolExecutionResult,
         progress_callback: Callable[[ProgressEvent], None] | None,
+        *,
+        web_step_offset: int = 0,
     ) -> None:
         data = tool_result.data or {}
         if task.intent == "web_action":
-            self._emit_web_tool_events(task, tool_result, progress_callback)
+            self._emit_web_tool_events(
+                task,
+                tool_result,
+                progress_callback,
+                step_offset=web_step_offset,
+            )
         elif task.intent == "ops_qa":
             answer = data.get("answer") if isinstance(data.get("answer"), dict) else {}
             sources = list(answer.get("sources") or []) if answer else []
@@ -1653,6 +1912,8 @@ class AgentController:
         task: Task,
         tool_result: ToolExecutionResult,
         progress_callback: Callable[[ProgressEvent], None] | None,
+        *,
+        step_offset: int = 0,
     ) -> None:
         data = tool_result.data or {}
         skill_params = self._web_skill_params(task) or dict(data.get("skill_execution") or {})
@@ -1673,16 +1934,24 @@ class AgentController:
                         },
                     ),
                 )
+            result_status = str(data.get("status") or "")
+            if tool_result.success:
+                skill_message = f"web skill 执行完成：{skill_params.get('skill_name')}。"
+            elif result_status == "awaiting_confirmation":
+                skill_message = f"web skill 已暂停，等待确认：{skill_params.get('skill_name')}。"
+            else:
+                skill_message = f"web skill 执行结束：{skill_params.get('skill_name')}。"
             self._emit(
                 progress_callback,
                 ProgressEvent(
                     stage="web.skill.executing",
-                    message=f"web skill 执行完成：{skill_params.get('skill_name')}。",
+                    message=skill_message,
                     task_id=task.id,
                     session_id=task.session_id,
                     details={
                         "skill_name": skill_params.get("skill_name"),
                         "success": bool(tool_result.success),
+                        "status": result_status,
                         "fallback_attempted": bool((data.get("skill_fallback") or {}).get("llm_fallback_used")),
                     },
                 ),
@@ -1722,7 +1991,7 @@ class AgentController:
                     },
                 ),
             )
-        for step in steps:
+        for step in steps[step_offset:]:
             action = step.get("action") or {}
             observation = step.get("observation") or {}
             step_index = step.get("step_index")

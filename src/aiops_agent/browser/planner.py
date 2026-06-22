@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from typing import TYPE_CHECKING
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from aiops_agent.browser.models import BrowserAction, BrowserObservation, BrowserTaskSpec
 
@@ -59,9 +59,18 @@ class BrowserPlanner:
         if login_action is not None:
             return login_action
 
-        login_action = self._login_action(spec, observation, successful_actions)
+        login_action = self._login_action(spec, observation, steps)
         if login_action is not None:
             return login_action
+
+        if self._is_login_observation(spec, observation):
+            return BrowserAction(
+                type="wait_for",
+                expected_outcome="等待登录提交完成并离开登录页",
+                risk_level="safe_read",
+                timeout_ms=2000,
+                key="login.wait_for_redirect",
+            )
 
         llm_action = self._llm_action(spec, observation, steps)
         if llm_action is not None:
@@ -135,21 +144,22 @@ class BrowserPlanner:
         observation: BrowserObservation | None,
         steps: list[dict],
     ) -> BrowserAction | None:
-        if not spec.requires_login or observation is None or observation.page_type != "login":
+        if not self._is_login_observation(spec, observation):
             return None
         action = self._llm_action(spec, observation, steps, allow_login_in_workflow=True)
         if action is None:
             return None
+        credential_username, credential_password = self._login_credentials(spec, steps)
         if action.type == "type_username":
-            if not spec.credential_username:
+            if not credential_username:
                 return None
-            action.value = spec.credential_username
+            action.value = credential_username
             action.expected_outcome = action.expected_outcome or "由 ReAct DOM 分析定位用户名输入框并填写用户名"
             return action
         if action.type == "type_password":
-            if not spec.credential_password:
+            if not credential_password:
                 return None
-            action.value = spec.credential_password
+            action.value = credential_password
             action.expected_outcome = action.expected_outcome or "由 ReAct DOM 分析定位密码输入框并填写密码"
             return action
         if action.type == "login_submit":
@@ -161,23 +171,23 @@ class BrowserPlanner:
         self,
         spec: BrowserTaskSpec,
         observation: BrowserObservation | None,
-        successful_actions: list[str | None],
+        steps: list[dict],
     ) -> BrowserAction | None:
-        if not spec.requires_login:
+        if not self._is_login_observation(spec, observation):
             return None
-        if observation is None or observation.page_type != "login":
-            return None
-        if not spec.credential_username or not spec.credential_password:
+        credential_username, credential_password = self._login_credentials(spec, steps)
+        if not credential_username or not credential_password:
             return BrowserAction(
                 type="finish",
                 expected_outcome="登录任务缺少可用凭据，等待执行器失败收敛",
                 risk_level="safe_read",
             )
+        successful_actions = self._current_login_actions(steps)
         if "type_username" not in successful_actions:
             return BrowserAction(
                 type="type_username",
                 target_hint=self._configured_login_field(spec, "username") or self._username_field(observation),
-                value=spec.credential_username,
+                value=credential_username,
                 expected_outcome="填写登录用户名",
                 risk_level="safe_local_edit",
             )
@@ -185,7 +195,7 @@ class BrowserPlanner:
             return BrowserAction(
                 type="type_password",
                 target_hint=self._configured_login_field(spec, "password") or self._password_field(observation),
-                value=spec.credential_password,
+                value=credential_password,
                 expected_outcome="填写登录密码",
                 risk_level="safe_local_edit",
             )
@@ -197,6 +207,58 @@ class BrowserPlanner:
                 risk_level="safe_local_edit",
             )
         return None
+
+    def _login_credentials(self, spec: BrowserTaskSpec, steps: list[dict]) -> tuple[str | None, str | None]:
+        pairs = spec.credential_pairs or (
+            [(spec.credential_username, spec.credential_password)]
+            if spec.credential_username and spec.credential_password
+            else []
+        )
+        if not pairs:
+            return None, None
+        submit_indexes = self._successful_login_submit_indexes(steps)
+        completed_logins = len(submit_indexes)
+        if submit_indexes and not self._has_new_login_cycle_after(steps, submit_indexes[-1]):
+            completed_logins -= 1
+        index = min(completed_logins, len(pairs) - 1)
+        return pairs[index]
+
+    def _is_login_observation(self, spec: BrowserTaskSpec, observation: BrowserObservation | None) -> bool:
+        if not spec.requires_login or observation is None or observation.page_type != "login":
+            return False
+        login_url = str(spec.site_config.get("login_url") or "")
+        if not login_url or not observation.url:
+            return True
+        expected = urlparse(login_url)
+        current = urlparse(observation.url)
+        return (current.netloc, current.path.rstrip("/")) == (expected.netloc, expected.path.rstrip("/"))
+
+    def _current_login_actions(self, steps: list[dict]) -> list[str]:
+        submit_indexes = self._successful_login_submit_indexes(steps)
+        last_submit = submit_indexes[-1] if submit_indexes else -1
+        if last_submit >= 0 and not self._has_new_login_cycle_after(steps, last_submit):
+            last_submit = submit_indexes[-2] if len(submit_indexes) > 1 else -1
+        return [
+            str(action_type)
+            for step in steps[last_submit + 1 :]
+            if step.get("result") == "success"
+            and (action_type := (step.get("action") or {}).get("type")) in {"type_username", "type_password", "login_submit"}
+        ]
+
+    def _successful_login_submit_indexes(self, steps: list[dict]) -> list[int]:
+        return [
+            index
+            for index, step in enumerate(steps)
+            if step.get("result") == "success" and (step.get("action") or {}).get("type") == "login_submit"
+        ]
+
+    def _has_new_login_cycle_after(self, steps: list[dict], submit_index: int) -> bool:
+        passive_actions = {"wait_for", "observe_page", "extract_text", "save_artifact"}
+        return any(
+            step.get("result") == "success"
+            and (step.get("action") or {}).get("type") not in passive_actions
+            for step in steps[submit_index + 1 :]
+        )
 
     def _configured_login_field(self, spec: BrowserTaskSpec, field_name: str) -> str | None:
         login_fields = spec.site_config.get("login_fields") or {}
@@ -310,7 +372,7 @@ class BrowserPlanner:
         llm_login_action = self._llm_login_action(spec, observation, steps)
         if llm_login_action is not None:
             return llm_login_action
-        login_action = self._login_action(spec, observation, successful_actions)
+        login_action = self._login_action(spec, observation, steps)
         if login_action is not None:
             return login_action
 

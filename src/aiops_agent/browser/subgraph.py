@@ -27,6 +27,7 @@ from aiops_agent.agent.state_codec import (
 from aiops_agent.browser.action_trace import build_canonical_action_trace
 from aiops_agent.browser.credentials import CredentialError
 from aiops_agent.browser.models import ActionResult, BrowserAction, BrowserObservation, BrowserTaskSpec
+from aiops_agent.browser.skills import WebSkillValidationError
 from aiops_agent.tasks.models import TaskArtifact, ToolExecutionResult
 
 
@@ -365,14 +366,14 @@ class WebAgentSubgraph:
         steps = state["steps"]
         artifacts = state["artifacts"]
 
-        if self.host._is_repeated_action(action, steps, spec.repeated_action_threshold):
+        proposed_action = self.host._stabilize_action(spec, action, steps)
+        if self.host._is_repeated_action(proposed_action, steps, spec.repeated_action_threshold):
             observation = tool.observe(last_action_result="repeated action blocked", force_artifact=True)
             artifacts.extend(self.host._artifacts_from_observation(observation))
             result = self.host._blocked_result("检测到同一页面重复动作超过阈值，已停止执行。", steps, observation, artifacts)
             self._update_context(state["run_id"], steps=steps, artifacts=artifacts)
             return {"artifacts": artifacts, "result": result, "route": "finalize"}
 
-        proposed_action = self.host._stabilize_action(spec, action, steps)
         intent_aligned, intent_reason = self.host._action_intent_alignment(spec, proposed_action, steps)
         if not intent_aligned:
             observation = tool.observe(last_action_result="intent mismatch blocked", force_artifact=True)
@@ -593,6 +594,9 @@ class WebAgentSubgraph:
         trace_id = state["trace_id"]
         final_observation = tool.observe(last_action_result="task completed", force_artifact=True)
         artifacts.extend(self.host._artifacts_from_observation(final_observation))
+        completion_error = self.host._compound_workflow_completion_error(spec, final_observation, steps)
+        if completion_error:
+            return self.host._blocked_result(completion_error, steps, final_observation, artifacts)
         report_path = self.host._write_execution_report(spec, steps, final_observation, "completed", None)
         artifacts.append(TaskArtifact(kind="execution_report", path=report_path))
         answer = self.host._answer_from_observation(spec, final_observation, steps)
@@ -823,7 +827,7 @@ class WebAgentSubgraph:
         return {"configurable": {"thread_id": thread_id, "subgraph": "web_agent"}}
 
     def _checkpoint_safe_spec(self, spec: BrowserTaskSpec) -> BrowserTaskSpec:
-        return replace(spec, credential_username=None, credential_password=None)
+        return replace(spec, credential_username=None, credential_password=None, credential_pairs=[])
 
     def _runtime_spec(self, spec: BrowserTaskSpec) -> BrowserTaskSpec:
         runtime_spec = replace(spec)
@@ -890,6 +894,28 @@ class WebAgentSubgraph:
     def _apply_skill_match(self, params: dict[str, Any]) -> dict[str, Any]:
         if params.get("skill_name") or self.host.web_skill_matcher is None:
             if params.get("skill_name"):
+                if not params.get("actions") and self.host.web_skill_matcher is not None:
+                    try:
+                        entities = self._skill_match_entities(params)
+                        match = self.host.web_skill_matcher.match_by_name(
+                            str(params["skill_name"]),
+                            {str(key): str(value) for key, value in (params.get("skill_parameters") or {}).items()},
+                            entities,
+                        )
+                        params["auto_plan"] = False
+                        params["actions"] = [asdict(action) for action in match.actions]
+                        params["skill_score"] = round(match.score, 4)
+                        params["skill_parameters"] = match.parameters
+                        params["skill_matched_keywords"] = match.matched_keywords
+                        params["requires_login"] = bool(
+                            params.get("requires_login")
+                            or (match.skill.workflow.get("execution") or {}).get("requires_login", False)
+                        )
+                        params["skill_fallback_to_llm_once"] = bool(
+                            (match.skill.workflow.get("execution") or {}).get("fallback_to_llm_once", True)
+                        )
+                    except WebSkillValidationError as exc:
+                        params["browser_config_error"] = str(exc)
                 params["skill_execution"] = {
                     "skill_name": params.get("skill_name"),
                     "score": params.get("skill_score"),

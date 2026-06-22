@@ -6,6 +6,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from aiops_agent.browser.action_trace import legacy_steps_from_canonical_trace
+from aiops_agent.browser.models import BrowserAction
+from aiops_agent.browser.risk import RiskEvaluator
 from aiops_agent.browser.skills.models import WebSkillGenerationError, WebSkillSaveResult
 from aiops_agent.browser.skills.store import WebSkillStore
 from aiops_agent.browser.skills.validator import validate_description, validate_skill_name
@@ -27,9 +29,35 @@ SECRET_ACTION_TYPES = {"type_username", "type_password", "login_submit"}
 SUPPORTED_ACTION_TYPES = {"open_url", "click", "type", "select", "press", "wait_for", "extract_text", "save_artifact", "finish"}
 DATE_VALUE_RE = re.compile(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}")
 
+GOAL_INPUT_FIELDS = (
+    "账户编号由",
+    "账户编号至",
+    "账户号由",
+    "账户号至",
+    "账号由",
+    "账号至",
+    "授权单位",
+    "所属单位",
+    "用户名称",
+    "用户名",
+    "登录名称",
+    "岗位名称",
+    "角色名称",
+    "账户名称",
+    "客户名称",
+    "公司名称",
+    "邮箱",
+    "金额",
+    "批次号",
+    "账号",
+    "账户号",
+)
+
 PARAMETER_ALIASES = {
     "start_date": ["开始日期", "起始日期", "开始时间", "起始时间", "from", "start", "start_date"],
     "end_date": ["结束日期", "截止日期", "结束时间", "截止时间", "to", "end", "end_date"],
+    "user_name": ["用户名称", "用户姓名", "user_name"],
+    "login_name": ["登录名称", "登录名", "登陆名称", "登陆名", "login_name"],
     "username": ["用户名", "登录名", "登录名称", "账号", "用户", "user", "username"],
     "company_name": ["公司", "授权单位", "客户名称", "客户", "企业"],
     "role": ["角色", "权限", "岗位", "role", "permission"],
@@ -38,13 +66,29 @@ PARAMETER_ALIASES = {
     "email": ["邮箱", "邮件", "email"],
     "amount": ["金额", "amount"],
     "batch_no": ["批次号", "网银批次号", "batch", "batch_no"],
-    "account_no": ["账号", "账户号", "银行卡号", "account", "account_no"],
+    "account_no": [
+        "账户编号由",
+        "账户编号至",
+        "账户编号",
+        "账户号由",
+        "账户号至",
+        "账号由",
+        "账号至",
+        "账号",
+        "账户号",
+        "银行卡号",
+        "account no from",
+        "account no to",
+        "account",
+        "account_no",
+    ],
 }
 
 
 class WebSkillGenerator:
-    def __init__(self, store: WebSkillStore | None = None):
+    def __init__(self, store: WebSkillStore | None = None, *, risk_evaluator: RiskEvaluator | None = None):
         self.store = store or WebSkillStore()
+        self.risk_evaluator = risk_evaluator or RiskEvaluator()
 
     def generate_from_task(self, task: Task, name: str | None = None) -> WebSkillSaveResult:
         data = (task.result or {}).get("data") or {}
@@ -74,6 +118,13 @@ class WebSkillGenerator:
         keywords = self._keywords(task, workflow_actions)
         description = validate_description(self._description(task, site_key, keywords))
         requires_login = bool(params.get("requires_login"))
+        credential_refs = [
+            str(ref)
+            for ref in (params.get("credential_refs") or [])
+            if str(ref).strip()
+        ]
+        if not credential_refs and params.get("credential_ref"):
+            credential_refs = [str(params["credential_ref"])]
 
         frontmatter = {
             "name": skill_name,
@@ -92,6 +143,7 @@ class WebSkillGenerator:
             "skill_name": skill_name,
             "site_key": site_key,
             "source_task_id": str(task.id),
+            "goal_template": self._goal_template(task.input, workflow_actions, inputs),
             "inputs": [
                 dict(input_spec)
                 for input_spec in inputs.values()
@@ -100,10 +152,12 @@ class WebSkillGenerator:
                 "keywords": keywords,
                 "fields": self._fields_from_actions(workflow_actions),
                 "answer_types": self._answer_types(task.input),
+                "navigation": self._explicit_navigation_labels(task.input),
             },
             "execution": {
                 "auto_plan": False,
                 "requires_login": requires_login,
+                "credential_refs": credential_refs,
                 "fallback_to_llm_once": True,
             },
             "actions": workflow_actions,
@@ -125,6 +179,25 @@ class WebSkillGenerator:
             matched_keywords=keywords,
             parameterization_decisions=parameterization_decisions,
         )
+
+    def _explicit_navigation_labels(self, goal: str) -> list[str]:
+        return [label for path in self._explicit_navigation_paths(goal) for label in path]
+
+    def _explicit_navigation_paths(self, goal: str) -> list[list[str]]:
+        paths: list[list[str]] = []
+        pattern = re.compile(
+            r"依次点击\s*(.+?)(?=(?:进入对应菜单|进入[^,，。；;]{0,20}(?:[,，]|然后|之后|$)|"
+            r"[,，]\s*(?:点击|等待|然后|之后|选中|选择|勾选|输入|填入|填写|告诉))|[。；;]|$)"
+        )
+        for match in pattern.finditer(goal):
+            labels = [
+                label
+                for item in re.split(r"[,，、]", match.group(1))
+                if (label := item.strip(" '\"“”"))
+            ]
+            if labels:
+                paths.append(labels)
+        return paths
 
     def _source_steps(self, data: dict[str, Any]) -> list[dict[str, Any]]:
         canonical = data.get("canonical_action_trace") or {}
@@ -160,6 +233,9 @@ class WebSkillGenerator:
         actions: list[dict[str, Any]] = []
         inputs: OrderedDict[str, dict[str, Any]] = OrderedDict()
         decisions: list[dict[str, Any]] = []
+        goal_inputs = self._goal_input_specs(task.input)
+        for name, spec in self._goal_output_specs(task.input).items():
+            goal_inputs.setdefault(name, spec)
         for step in steps:
             if step.get("result") != "success":
                 continue
@@ -168,6 +244,9 @@ class WebSkillGenerator:
             if action_type in SECRET_ACTION_TYPES or action_type not in SUPPORTED_ACTION_TYPES:
                 continue
             action = {key: raw_action[key] for key in ACTION_FIELDS if key in raw_action and raw_action[key] not in (None, "")}
+            target_id = str(action.get("target_id") or "")
+            if target_id.startswith("aiops-"):
+                action.pop("target_id", None)
             if action_type == "finish" and action.get("value"):
                 decisions.append(
                     self._decision(
@@ -179,22 +258,81 @@ class WebSkillGenerator:
                     )
                 )
                 action.pop("value", None)
-            if action_type in {"type", "select", "press"} and action.get("value"):
+            if action_type in {"extract_text", "save_artifact"} and action.get("value"):
+                decisions.append(
+                    self._decision(
+                        action,
+                        original_value="[dynamic result omitted]",
+                        decision="dynamic_result/excluded",
+                        confidence=1.0,
+                        reason=f"{action_type} result text is regenerated from the next run",
+                    )
+                )
+                action.pop("value", None)
+            if action_type in {"type", "select"} and action.get("value"):
                 value = str(action["value"])
-                decision = self._parameter_decision_for_action(action, value, task.input, inputs)
+                decision = self._parameter_decision_for_action(action, value, task.input, inputs, goal_inputs)
                 decisions.append(decision)
                 if decision["decision"] == "variable":
                     param_name = str(decision["param_name"])
-                    self._record_input(inputs, param_name, str(decision["param_type"]), value)
+                    goal_spec = goal_inputs.get(param_name)
+                    if goal_spec and self._looks_like_technical_field_hint(action.get("target_hint")):
+                        semantic_hint = self._semantic_field_hint(action, goal_spec)
+                        if semantic_hint:
+                            action["target_hint"] = semantic_hint
+                    self._record_input(
+                        inputs,
+                        param_name,
+                        str(decision["param_type"]),
+                        value,
+                        aliases=goal_spec.get("aliases") if goal_spec else None,
+                    )
                     action["value"] = "{{" + param_name + "}}"
             if action_type == "open_url" and action.get("value"):
                 action["value"] = str(action["value"])
             if action:
+                self._normalize_action_risk(action)
                 action.setdefault("key", f"skill.step.{len(actions) + 1}")
                 actions.append(action)
         if not actions:
             raise WebSkillGenerationError("成功任务中没有可复用的非登录浏览器动作。")
+        actions = self._prune_clicks_during_explicit_navigation(actions, task.input)
+        for name, spec in goal_inputs.items():
+            if not spec.get("output_only") or name in inputs:
+                continue
+            value = str(spec.get("value") or "")
+            self._record_input(
+                inputs,
+                name,
+                str(spec.get("type") or "text"),
+                value,
+                aliases=list(spec.get("aliases") or [name]),
+            )
+            decisions.append(
+                {
+                    "action_key": f"skill.output.{name}",
+                    "field_hint": str(spec.get("field_hint") or ""),
+                    "original_value": value,
+                    "decision": "variable",
+                    "param_name": name,
+                    "param_type": str(spec.get("type") or "text"),
+                    "confidence": 0.95,
+                    "reason": "value is part of the requested answer contract",
+                }
+            )
+        self._normalize_goal_field_click_targets(actions, goal_inputs)
+        actions = self._insert_missing_goal_input_actions(actions, inputs, goal_inputs, decisions, task.input)
+        self._render_parameter_references(actions, inputs)
         return actions, inputs, decisions
+
+    def _normalize_action_risk(self, action: dict[str, Any]) -> None:
+        try:
+            browser_action = BrowserAction(**action)
+        except TypeError:
+            return
+        risk_level = self.risk_evaluator.classify(browser_action)
+        action["risk_level"] = risk_level
+        action["requires_confirmation"] = risk_level in {"unsafe_mutation", "unknown_risk"}
 
     def _parameter_decision_for_action(
         self,
@@ -202,9 +340,19 @@ class WebSkillGenerator:
         value: str,
         goal: str,
         existing: OrderedDict[str, dict[str, Any]],
+        goal_inputs: OrderedDict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        target = self._action_context(action)
-        lowered = target.lower()
+        matched_goal_input = self._goal_input_for_value(value, goal_inputs or OrderedDict())
+        if matched_goal_input:
+            return self._decision(
+                action,
+                original_value=value,
+                decision="variable",
+                param_name=str(matched_goal_input["name"]),
+                param_type=str(matched_goal_input.get("type") or "text"),
+                confidence=0.95,
+                reason="value matches explicit user input in original goal",
+            )
         if DATE_VALUE_RE.fullmatch(value.strip()):
             base_name = self._date_param_name(action, existing)
             param_name = self._unique_param_name(base_name, value, existing)
@@ -220,6 +368,8 @@ class WebSkillGenerator:
         if "@" in value:
             return self._variable_decision(action, value, "email", "email", 0.95, "email value")
         candidates = (
+            ("user_name", "text", PARAMETER_ALIASES["user_name"]),
+            ("login_name", "text", PARAMETER_ALIASES["login_name"]),
             ("username", "text", PARAMETER_ALIASES["username"]),
             ("company_name", "text", PARAMETER_ALIASES["company_name"]),
             ("role", "text", PARAMETER_ALIASES["role"]),
@@ -229,17 +379,19 @@ class WebSkillGenerator:
             ("batch_no", "text", PARAMETER_ALIASES["batch_no"]),
             ("account_no", "text", PARAMETER_ALIASES["account_no"]),
         )
-        for param_name, param_type, markers in candidates:
-            if any(marker.lower() in lowered for marker in markers):
-                return self._variable_decision(
-                    action,
-                    value,
-                    param_name,
-                    param_type,
-                    0.85,
-                    f"field context matched {param_name}",
-                    existing,
-                )
+        for context in self._action_contexts(action):
+            lowered = context.lower()
+            for param_name, param_type, markers in candidates:
+                if any(marker.lower() in lowered for marker in markers):
+                    return self._variable_decision(
+                        action,
+                        value,
+                        param_name,
+                        param_type,
+                        0.85,
+                        f"field context matched {param_name}",
+                        existing,
+                    )
         if value and value in goal:
             param_name = self._unique_param_name("input_value", value, existing)
             return self._decision(
@@ -309,6 +461,7 @@ class WebSkillGenerator:
         name: str,
         param_type: str,
         value: str,
+        aliases: list[str] | None = None,
     ) -> None:
         if name not in inputs:
             inputs[name] = {
@@ -316,7 +469,7 @@ class WebSkillGenerator:
                 "type": param_type,
                 "required": True,
                 "source": "user_goal",
-                "aliases": PARAMETER_ALIASES.get(name, [name]),
+                "aliases": aliases or PARAMETER_ALIASES.get(name, [name]),
                 "examples": [value],
                 "original_value": value,
             }
@@ -342,6 +495,345 @@ class WebSkillGenerator:
 
     def _action_context(self, action: dict[str, Any]) -> str:
         return " ".join(str(action.get(key) or "") for key in ("target_hint", "target_id", "expected_outcome"))
+
+    def _action_contexts(self, action: dict[str, Any]) -> tuple[str, ...]:
+        field_context = " ".join(str(action.get(key) or "") for key in ("target_hint", "target_id")).strip()
+        outcome_context = str(action.get("expected_outcome") or "").strip()
+        outcome_context = re.sub(r"按用户(?:原始)?指令", "", outcome_context).strip()
+        return tuple(context for context in (field_context, outcome_context) if context)
+
+    def _looks_like_technical_field_hint(self, value: Any) -> bool:
+        hint = str(value or "").strip()
+        return re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.:-]*", hint) is not None
+
+    def _semantic_field_hint(self, action: dict[str, Any], goal_spec: dict[str, Any]) -> str | None:
+        context = self._action_context(action)
+        field_hints = [
+            str(item).strip()
+            for item in goal_spec.get("field_hints") or [goal_spec.get("field_hint")]
+            if str(item or "").strip()
+        ]
+        for field_hint in field_hints:
+            if field_hint in context:
+                return field_hint
+
+        outcome = str(action.get("expected_outcome") or "")
+        chinese_match = re.search(
+            r"(?:字段|输入框)\s*[\"“”']?([^,，。；;\"“”']{1,30}?)[\"“”']?\s*(?:中|里)\s*"
+            r"(?:输入|填写|填入)",
+            outcome,
+        )
+        if chinese_match:
+            return chinese_match.group(1).strip()
+        english_match = re.search(r"(?:into|in)\s+(?:the\s+)?(.+?)\s+field\b", outcome, re.I)
+        if english_match:
+            return english_match.group(1).strip(" '\"“”")
+        if not goal_spec.get("output_only") and field_hints:
+            return field_hints[0]
+        return None
+
+    def _normalize_goal_field_click_targets(
+        self,
+        actions: list[dict[str, Any]],
+        goal_inputs: OrderedDict[str, dict[str, Any]],
+    ) -> None:
+        for action in actions:
+            if action.get("type") != "click":
+                continue
+            expected_outcome = str(action.get("expected_outcome") or "")
+            if not any(marker in expected_outcome for marker in ("下拉", "输入框", "输入区域")):
+                continue
+            for spec in goal_inputs.values():
+                field_hint = str(spec.get("field_hint") or "")
+                if field_hint and field_hint in expected_outcome:
+                    action["target_hint"] = field_hint
+                    break
+
+    def _goal_input_specs(self, goal: str) -> OrderedDict[str, dict[str, Any]]:
+        specs: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        named_fields = "|".join(re.escape(field) for field in GOAL_INPUT_FIELDS)
+        value_first_pattern = re.compile(
+            r"(?:将|把)\s*[\"“”']?(?P<value>[^,，。；;\"“”']+?)[\"“”']?\s*"
+            r"(?:输入|填写|填入)(?:到|至|进)?\s*(?P<fields>.+?)(?:中|里)"
+            r"(?=$|[,，。；;]|然后|之后|随后|接着|再)"
+        )
+        for match in value_first_pattern.finditer(goal):
+            value = match.group("value").strip("'\"“” ")
+            raw_fields = [
+                item.strip("'\"“” ")
+                for item in re.split(r"\s*(?:和|及|与|、|,|，)\s*", match.group("fields"))
+            ]
+            for raw_field in raw_fields:
+                field_match = re.search(named_fields, raw_field)
+                field = field_match.group(0) if field_match else raw_field
+                self._record_goal_input_spec(specs, field, value, position=match.start())
+        expanded_input_pattern = re.compile(
+            rf"(?:在|向)\s*({named_fields})(?:中|里)?"
+            r"(?:\s*(?:展开|打开)[^,，。；;]{0,40}[,，]\s*)"
+            r"(?:输入|填写|填入|选择)\s*[\"“']?([^,，。；;\"”']+)"
+        )
+        for match in expanded_input_pattern.finditer(goal):
+            field = match.group(1).strip("'\"“” ")
+            value = match.group(2).strip("'\"“” ")
+            self._record_goal_input_spec(specs, field, value, position=match.start())
+        typed_pattern = re.compile(
+            r"(?:在|向)\s*([^,，。；;\s]{2,30}?)(?:中|里)?"
+            r"(?:输入|填写|填入|选择)\s*[\"“']?([^,，。；;\"”']+)"
+        )
+        for match in typed_pattern.finditer(goal):
+            field = match.group(1).strip("'\"“” ")
+            value = match.group(2).strip("'\"“” ")
+            self._record_goal_input_spec(specs, field, value, position=match.start())
+        field_pattern = re.compile(rf"({named_fields})\s*(?:为|是|叫|:|：)\s*([^,，。；;\s]+)")
+        for match in field_pattern.finditer(goal):
+            field = match.group(1).strip()
+            value = match.group(2).strip("'\"“” ")
+            self._record_goal_input_spec(specs, field, value, position=match.start())
+        return specs
+
+    def _goal_output_specs(self, goal: str) -> OrderedDict[str, dict[str, Any]]:
+        specs: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        for match in re.finditer(
+            r"(?P<value>[A-Za-z0-9][A-Za-z0-9_.:-]*)\s*是否在(?:该用户的)?\s*"
+            r"(?P<label>已分配账户|Assigned Account)(?:列表)?中",
+            goal,
+            re.I,
+        ):
+            value = match.group("value")
+            specs["account_no"] = {
+                "name": "account_no",
+                "type": "text",
+                "field_hint": match.group("label"),
+                "value": value,
+                "aliases": PARAMETER_ALIASES["account_no"],
+                "examples": [value],
+                "position": match.start(),
+                "output_only": True,
+            }
+        return specs
+
+    def _record_goal_input_spec(
+        self,
+        specs: OrderedDict[str, dict[str, Any]],
+        field: str,
+        value: str,
+        *,
+        position: int,
+    ) -> None:
+        field = re.sub(r"^(?:(?:之后|然后|随后|接着)再?|再)?(?:在|向)", "", field).strip()
+        if not field or not value:
+            return
+        param_name = self._param_name_for_field(field)
+        param_type = "date" if DATE_VALUE_RE.fullmatch(value) else "text"
+        if param_name in specs:
+            examples = specs[param_name].setdefault("examples", [])
+            if value not in examples:
+                examples.append(value)
+            field_hints = specs[param_name].setdefault("field_hints", [str(specs[param_name].get("field_hint") or "")])
+            if field not in field_hints:
+                field_hints.append(field)
+            return
+        specs[param_name] = {
+            "name": param_name,
+            "type": param_type,
+            "field_hint": field,
+            "field_hints": [field],
+            "value": value,
+            "aliases": PARAMETER_ALIASES.get(param_name, [field, param_name]),
+            "examples": [value],
+            "position": position,
+        }
+
+    def _param_name_for_field(self, field: str) -> str:
+        normalized = field.lower()
+        if "用户名称" in field or "用户姓名" in field:
+            return "user_name"
+        if "登录" in field or "登陆" in field:
+            return "login_name"
+        for name, aliases in PARAMETER_ALIASES.items():
+            if any(alias.lower() in normalized or alias in field for alias in aliases):
+                return name
+        return self._slug(field.replace("名称", "_name").replace("编号", "_no")) or "input_value"
+
+    def _goal_input_for_value(
+        self,
+        value: str,
+        goal_inputs: OrderedDict[str, dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        for spec in goal_inputs.values():
+            if value in spec.get("examples", []):
+                return spec
+        return None
+
+    def _insert_missing_goal_input_actions(
+        self,
+        actions: list[dict[str, Any]],
+        inputs: OrderedDict[str, dict[str, Any]],
+        goal_inputs: OrderedDict[str, dict[str, Any]],
+        decisions: list[dict[str, Any]],
+        goal: str,
+    ) -> list[dict[str, Any]]:
+        missing_specs = [
+            spec for name, spec in goal_inputs.items()
+            if name not in inputs and not spec.get("output_only") and str(spec.get("value") or "")
+        ]
+        if not missing_specs:
+            return actions
+        insert_index = self._first_result_action_index(actions)
+        synthesized: list[dict[str, Any]] = []
+        for spec in missing_specs:
+            name = str(spec["name"])
+            value = str(spec["value"])
+            field_hint = str(spec.get("field_hint") or name)
+            pre_click = self._click_target_before_goal_input(goal, spec)
+            if pre_click and not self._has_click_action(actions + synthesized, pre_click):
+                synthesized.append(
+                    {
+                        "type": "click",
+                        "target_hint": pre_click,
+                        "expected_outcome": f"打开{field_hint}输入区域",
+                        "risk_level": "safe_read",
+                        "key": f"skill.synthetic.{name}.open",
+                    }
+                )
+            self._record_input(
+                inputs,
+                name,
+                str(spec.get("type") or "text"),
+                value,
+                aliases=list(spec.get("aliases") or [field_hint, name]),
+            )
+            type_action = {
+                "type": "type",
+                "target_hint": field_hint,
+                "value": "{{" + name + "}}",
+                "expected_outcome": f"填写{field_hint}",
+                "risk_level": "safe_local_edit",
+                "key": f"skill.synthetic.{name}.type",
+            }
+            synthesized.append(type_action)
+            decisions.append(
+                self._decision(
+                    type_action,
+                    original_value=value,
+                    decision="variable",
+                    param_name=name,
+                    param_type=str(spec.get("type") or "text"),
+                    confidence=0.9,
+                    reason="synthesized from explicit user input in original goal",
+                )
+            )
+            post_click = self._click_target_after_goal_input(goal, spec)
+            if post_click and not self._has_click_action(actions + synthesized, post_click):
+                synthesized.append(
+                    {
+                        "type": "click",
+                        "target_hint": post_click,
+                        "expected_outcome": f"提交{field_hint}",
+                        "risk_level": "safe_read",
+                        "key": f"skill.synthetic.{name}.submit",
+                    }
+                )
+        if not synthesized:
+            return actions
+        return [*actions[:insert_index], *synthesized, *actions[insert_index:]]
+
+    def _first_result_action_index(self, actions: list[dict[str, Any]]) -> int:
+        for index, action in enumerate(actions):
+            if action.get("type") in {"extract_text", "save_artifact", "finish"}:
+                return index
+        return len(actions)
+
+    def _click_target_before_goal_input(self, goal: str, spec: dict[str, Any]) -> str | None:
+        position = int(spec.get("position") or 0)
+        before = goal[:position]
+        matches = re.findall(r"点击\s*([^,，。；;\s]{1,20}?)(?:按钮)?(?:后|，|,|$)", before)
+        if not matches:
+            return None
+        return self._clean_click_target(matches[-1])
+
+    def _click_target_after_goal_input(self, goal: str, spec: dict[str, Any]) -> str | None:
+        value = str(spec.get("value") or "")
+        position = goal.find(value, int(spec.get("position") or 0))
+        if position < 0:
+            return None
+        after = goal[position + len(value):position + len(value) + 80]
+        match = re.search(r"点击\s*([^,，。；;\s]{1,20}?)(?:按钮)?(?:后|，|,|$)", after)
+        if not match:
+            return None
+        return self._clean_click_target(match.group(1))
+
+    def _clean_click_target(self, value: str) -> str | None:
+        cleaned = value.strip("'\"“” ")
+        cleaned = re.sub(r"(按钮|后)$", "", cleaned).strip()
+        return cleaned or None
+
+    def _has_click_action(self, actions: list[dict[str, Any]], target_hint: str) -> bool:
+        return any(
+            action.get("type") == "click" and str(action.get("target_hint") or "") == target_hint
+            for action in actions
+        )
+
+    def _prune_clicks_during_explicit_navigation(
+        self,
+        actions: list[dict[str, Any]],
+        goal: str,
+    ) -> list[dict[str, Any]]:
+        paths = self._explicit_navigation_paths(goal)
+        if not paths:
+            return actions
+        route_ranges: list[tuple[int, int, set[int]]] = []
+        search_from = 0
+        for labels in paths:
+            expected = [self._normalize_navigation_label(label) for label in labels]
+            positions: list[int] = []
+            cursor = 0
+            for index in range(search_from, len(actions)):
+                action = actions[index]
+                if action.get("type") != "click" or cursor >= len(expected):
+                    continue
+                target = self._normalize_navigation_label(str(action.get("target_hint") or ""))
+                if target == expected[cursor]:
+                    positions.append(index)
+                    cursor += 1
+            if cursor != len(expected):
+                return actions
+            route_ranges.append((positions[0], positions[-1], set(positions)))
+            search_from = positions[-1] + 1
+        return [
+            action
+            for index, action in enumerate(actions)
+            if not any(
+                first_route <= index <= last_route
+                and action.get("type") == "click"
+                and index not in route_positions
+                for first_route, last_route, route_positions in route_ranges
+            )
+        ]
+
+    def _normalize_navigation_label(self, value: str) -> str:
+        return re.sub(r"\s+", "", value).casefold()
+
+    def _render_parameter_references(
+        self,
+        actions: list[dict[str, Any]],
+        inputs: OrderedDict[str, dict[str, Any]],
+    ) -> None:
+        replacements = [
+            (str(spec.get("original_value") or ""), "{{" + name + "}}")
+            for name, spec in inputs.items()
+            if spec.get("original_value")
+        ]
+        replacements.sort(key=lambda item: len(item[0]), reverse=True)
+        for action in actions:
+            for key in ("target_hint", "expected_outcome", "value"):
+                if key not in action or not isinstance(action[key], str):
+                    continue
+                parts = re.split(r"(\{\{[^{}]+\}\})", action[key])
+                for index in range(0, len(parts), 2):
+                    for original, replacement in replacements:
+                        parts[index] = parts[index].replace(original, replacement)
+                action[key] = "".join(parts)
 
     def _date_param_name(self, action: dict[str, Any], existing: OrderedDict[str, dict[str, Any]]) -> str:
         target_id = str(action.get("target_id") or "").lower()
@@ -408,11 +900,42 @@ class WebSkillGenerator:
         return list(fields.keys())
 
     def _answer_types(self, goal: str) -> list[str]:
-        if "岗位名称" in goal or "角色" in goal or "权限" in goal:
+        if self._goal_output_specs(goal):
+            return ["membership"]
+        if "岗位名称" in goal or "角色" in goal:
             return ["role_names"]
         if self._requires_answer(goal):
             return ["text_answer"]
         return []
+
+    def _goal_template(
+        self,
+        goal: str,
+        actions: list[dict[str, Any]],
+        inputs: OrderedDict[str, dict[str, Any]],
+    ) -> str:
+        template = goal.strip()
+        replacements = sorted(
+            (
+                (str(spec.get("original_value") or ""), "{{" + name + "}}")
+                for name, spec in inputs.items()
+                if spec.get("original_value")
+            ),
+            key=lambda item: len(item[0]),
+            reverse=True,
+        )
+        for original, replacement in replacements:
+            template = template.replace(original, replacement)
+        if template:
+            return template
+        outcomes = list(
+            dict.fromkeys(
+                str(action.get("expected_outcome") or "").strip()
+                for action in actions
+                if action.get("type") != "open_url" and str(action.get("expected_outcome") or "").strip()
+            )
+        )
+        return "按顺序完成以下网页任务：" + "；".join(outcomes)
 
     def _requires_answer(self, goal: str) -> bool:
         return any(keyword in goal for keyword in ("告诉我", "返回", "输出", "当前", "是什么", "岗位名称"))

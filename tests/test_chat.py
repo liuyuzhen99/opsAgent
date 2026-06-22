@@ -50,8 +50,39 @@ class FakeController:
         self.confirm_statuses = list(confirm_statuses or [])
         self.run_calls = []
         self.confirm_calls = []
+        self.skill_calls = []
+        self.deleted_skills = []
+        self.renamed_skills = []
         self.session_store = FakeSessionStore()
         self.task_manager = FakeTaskManager()
+        self.skills = [
+            {
+                "name": "ifinance-user-search",
+                "description": "search user",
+                "site_key": "ifinance",
+                "inputs": [
+                    {"name": "login_name", "required": True, "type": "text", "examples": ["alice"]},
+                    {"name": "org_name", "required": False, "type": "text", "examples": []},
+                ],
+                "runtime_inputs": [
+                    {
+                        "name": "site_key",
+                        "required": False,
+                        "type": "site_key",
+                        "description": "站点标识",
+                        "examples": ["ifinance"],
+                        "default": "ifinance",
+                    },
+                    {
+                        "name": "user",
+                        "required": True,
+                        "type": "credential_user",
+                        "description": "登录用户",
+                        "examples": [],
+                    }
+                ],
+            }
+        ]
 
     def run(self, text, **kwargs):
         self.run_calls.append((text, kwargs))
@@ -93,6 +124,27 @@ class FakeController:
             last_task_id=task.id,
             summary=f"last={task.input}",
         )
+        return task
+
+    def list_web_skills(self):
+        return self.skills
+
+    def delete_web_skill(self, name):
+        self.deleted_skills.append(name)
+        return f"/tmp/{name}"
+
+    def rename_web_skill(self, old_name, new_name):
+        self.renamed_skills.append((old_name, new_name))
+        return f"/tmp/{new_name}"
+
+    def run_web_skill(self, skill_name, parameters, **kwargs):
+        self.skill_calls.append((skill_name, parameters, kwargs))
+        callback = kwargs.get("progress_callback")
+        session_id = kwargs.get("session_id") or "session-1"
+        if callback:
+            callback(ProgressEvent(stage="web.skill.matched", message=f"命中 web skill：{skill_name}。", session_id=session_id))
+        task = _task(f"/skill {skill_name}", task_id=f"skill-task-{len(self.skill_calls)}", session_id=session_id)
+        self.task_manager.tasks[task.id] = task
         return task
 
     def confirm(self, task_id, **kwargs):
@@ -303,6 +355,183 @@ def test_chat_runner_confirmation_yes_resumes():
     text = output.getvalue()
     assert "需要人工确认后才能继续" in text
     assert "[tool.running]" in text
+
+
+def test_chat_runner_lists_web_skills():
+    controller = FakeController()
+    output = StringIO()
+    runner = ChatRunner(
+        controller,
+        ChatOptions(),
+        input_func=_input_script(["/skills", "/exit"]),
+        output=output,
+    )
+
+    assert runner.run() == 0
+
+    text = output.getvalue()
+    assert "可用 web skill" in text
+    assert "ifinance-user-search" in text
+    assert "required=login_name, user" in text
+    assert "inputs=login_name*, org_name" in text
+    assert "runtime=site_key=ifinance, user*" in text
+
+
+def test_chat_runner_skill_help_prints_inputs():
+    controller = FakeController()
+    output = StringIO()
+    runner = ChatRunner(
+        controller,
+        ChatOptions(),
+        input_func=_input_script(["/skill ifinance-user-search --help", "/exit"]),
+        output=output,
+    )
+
+    assert runner.run() == 0
+
+    text = output.getvalue()
+    assert "ifinance-user-search: search user" in text
+    assert "site_key: ifinance" in text
+    assert "login_name (required, text)" in text
+    assert "runtime inputs:" in text
+    assert "site_key (optional, site_key)" in text
+    assert "user (required, credential_user)" in text
+
+
+def test_chat_runner_skill_command_parses_key_values_and_quotes():
+    controller = FakeController()
+    output = StringIO()
+    runner = ChatRunner(
+        controller,
+        ChatOptions(session_id="session-1", max_steps=7),
+        input_func=_input_script([
+            '/skill ifinance-user-search login_name=lvjing_1228 org_name="101-51011000 内部客户"',
+            "/exit",
+        ]),
+        output=output,
+    )
+
+    assert runner.run() == 0
+
+    assert controller.skill_calls[0][0] == "ifinance-user-search"
+    assert controller.skill_calls[0][1] == {
+        "login_name": "lvjing_1228",
+        "org_name": "101-51011000 内部客户",
+    }
+    assert controller.skill_calls[0][2]["session_id"] == "session-1"
+    assert controller.skill_calls[0][2]["max_steps"] == 7
+    assert "[web.skill.matched]" in output.getvalue()
+
+
+def test_chat_runner_skill_command_rejects_bad_parameter():
+    controller = FakeController()
+    output = StringIO()
+    runner = ChatRunner(
+        controller,
+        ChatOptions(),
+        input_func=_input_script(["/skill ifinance-user-search login_name", "/exit"]),
+        output=output,
+    )
+
+    assert runner.run() == 0
+
+    assert controller.skill_calls == []
+    assert "参数格式错误" in output.getvalue()
+
+
+def test_chat_runner_delete_skill_confirms_before_delete():
+    controller = FakeController()
+    output = StringIO()
+    runner = ChatRunner(
+        controller,
+        ChatOptions(),
+        input_func=_input_script(["/delete-skill ifinance-user-search", "yes", "/exit"]),
+        output=output,
+    )
+
+    assert runner.run() == 0
+
+    assert controller.deleted_skills == ["ifinance-user-search"]
+    assert "已删除 skill: ifinance-user-search" in output.getvalue()
+
+
+def test_chat_runner_delete_skill_can_be_cancelled():
+    controller = FakeController()
+    output = StringIO()
+    runner = ChatRunner(
+        controller,
+        ChatOptions(),
+        input_func=_input_script(["/delete-skill ifinance-user-search", "no", "/exit"]),
+        output=output,
+    )
+
+    assert runner.run() == 0
+
+    assert controller.deleted_skills == []
+    assert "已取消删除" in output.getvalue()
+
+
+def test_chat_runner_delete_skill_supports_yes_flag_and_alias():
+    controller = FakeController()
+    runner = ChatRunner(
+        controller,
+        ChatOptions(),
+        input_func=_input_script(["/remove-skill ifinance-user-search --yes", "/exit"]),
+        output=StringIO(),
+    )
+
+    assert runner.run() == 0
+
+    assert controller.deleted_skills == ["ifinance-user-search"]
+
+
+def test_chat_runner_delete_skill_help_does_not_delete():
+    controller = FakeController()
+    output = StringIO()
+    runner = ChatRunner(
+        controller,
+        ChatOptions(),
+        input_func=_input_script(["/delete-skill --help", "/exit"]),
+        output=output,
+    )
+
+    assert runner.run() == 0
+
+    assert controller.deleted_skills == []
+    assert "用法: /delete-skill <skill-name> [--yes]" in output.getvalue()
+
+
+def test_chat_runner_rename_skill():
+    controller = FakeController()
+    output = StringIO()
+    runner = ChatRunner(
+        controller,
+        ChatOptions(),
+        input_func=_input_script([
+            "/rename-skill ifinance-user-search ifinance-assigned-role",
+            "/exit",
+        ]),
+        output=output,
+    )
+
+    assert runner.run() == 0
+    assert controller.renamed_skills == [("ifinance-user-search", "ifinance-assigned-role")]
+    assert "已将 skill ifinance-user-search 改名为 ifinance-assigned-role" in output.getvalue()
+
+
+def test_chat_runner_rename_skill_validates_usage():
+    controller = FakeController()
+    output = StringIO()
+    runner = ChatRunner(
+        controller,
+        ChatOptions(),
+        input_func=_input_script(["/rename-skill only-one-name", "/exit"]),
+        output=output,
+    )
+
+    assert runner.run() == 0
+    assert controller.renamed_skills == []
+    assert "用法: /rename-skill <old-name> <new-name>" in output.getvalue()
 
 
 def test_chat_runner_prompts_again_when_confirm_returns_awaiting_confirmation():

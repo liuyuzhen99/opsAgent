@@ -86,8 +86,10 @@ class BrowserTaskSpec:
     forbidden_actions: list[str] = field(default_factory=list)
     allowed_domains: list[str] = field(default_factory=list)
     credential_ref: str | None = None
+    credential_refs: list[str] = field(default_factory=list)
     credential_username: str | None = None
     credential_password: str | None = None
+    credential_pairs: list[tuple[str, str]] = field(default_factory=list)
     requires_login: bool = False
     requires_remote_mutation: bool = False
     auto_plan: bool = True

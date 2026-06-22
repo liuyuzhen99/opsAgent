@@ -175,12 +175,17 @@ class IntentParser:
             return None
 
         entities = dict(parsed.entities)
-        if parsed.intent == "knowledge_write":
+        parsed_intent = parsed.intent
+        if parsed_intent == "rpa_action" and self._looks_like_browser_workflow(text):
+            parsed_intent = "web_action"
+        if parsed_intent == "knowledge_write":
             entities.setdefault("system", None)
-        elif parsed.intent == "rpa_action":
+        elif parsed_intent == "rpa_action":
             entities.setdefault("target", self._extract_rpa_target(text))
             entities.setdefault("capability", self._extract_rpa_capability(text) or "ssh")
             entities.setdefault("operation", "login")
+        elif parsed_intent == "web_action":
+            entities = self.enrich_web_action_entities(text, entities)
         else:
             entities.setdefault("system", self.default_system)
         entities.setdefault("env", self.default_env)
@@ -189,7 +194,31 @@ class IntentParser:
         entities["llm_model"] = parsed.model
         if parsed.request_id:
             entities["llm_request_id"] = parsed.request_id
-        return IntentResult(intent=parsed.intent, entities=entities)
+        return IntentResult(intent=parsed_intent, entities=entities)
+
+    def enrich_web_action_entities(self, text: str, entities: dict[str, Any]) -> dict[str, Any]:
+        enriched = dict(entities)
+        rule_entities = self._web_action_result(text, text.lower()).entities
+        credential_refs = self._extract_credential_refs(text)
+        enriched["credential_ref"] = enriched.get("credential_ref") or (credential_refs[0] if credential_refs else None)
+        enriched["credential_refs"] = credential_refs or (
+            [str(enriched["credential_ref"])] if enriched.get("credential_ref") else []
+        )
+        enriched["requires_login"] = bool(enriched.get("requires_login") or rule_entities["requires_login"])
+        enriched["has_side_effect"] = bool(enriched.get("has_side_effect") or rule_entities["has_side_effect"])
+        enriched["start_url"] = enriched.get("start_url") or rule_entities["start_url"]
+        enriched["allowed_domains"] = list(enriched.get("allowed_domains") or rule_entities["allowed_domains"])
+        enriched["workflow"] = enriched.get("workflow") or rule_entities["workflow"]
+        workflow_fields = dict(rule_entities["workflow_fields"])
+        workflow_fields.update(enriched.get("workflow_fields") or {})
+        enriched["workflow_fields"] = workflow_fields
+        return enriched
+
+    def _looks_like_browser_workflow(self, text: str) -> bool:
+        lowered = text.lower()
+        if self._extract_url(text):
+            return True
+        return any(cue in lowered for cue in ("侧边栏", "依次点击", "点击按钮", "网页", "网站", "浏览器"))
 
     def _parse_with_rules(self, normalized: str) -> IntentResult:
         lowered = normalized.lower()
@@ -235,6 +264,8 @@ class IntentParser:
                 "raw_text": normalized,
                 "start_url": start_url,
                 "allowed_domains": allowed_domains,
+                "credential_ref": self._extract_credential_ref(normalized),
+                "credential_refs": self._extract_credential_refs(normalized),
                 "requires_login": any(keyword in lowered for keyword in ("登录", "login", "账号", "password", "密码")),
                 "has_side_effect": any(
                     keyword in lowered
@@ -245,11 +276,14 @@ class IntentParser:
                         "创建",
                         "开通",
                         "授权",
+                        "复核",
+                        "审核",
                         "submit",
                         "save",
                         "delete",
                         "create",
                         "grant",
+                        "approve",
                     )
                 ),
                 "workflow": self._extract_web_workflow(normalized),
@@ -262,6 +296,27 @@ class IntentParser:
         if match:
             return match.group(0).rstrip("。,.，")
         return None
+
+    def _extract_credential_ref(self, text: str) -> str | None:
+        refs = self._extract_credential_refs(text)
+        return refs[0] if refs else None
+
+    def _extract_credential_refs(self, text: str) -> list[str]:
+        explicit = re.search(
+            r"(?:credential[_ -]?ref|凭据(?:引用)?|credential)\s*[:：=]\s*([A-Za-z0-9][A-Za-z0-9_.@:-]*)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if explicit:
+            return [explicit.group(1)]
+        return [
+            match.group(1)
+            for match in re.finditer(
+                r"(?:使用|用)\s*([A-Za-z0-9][A-Za-z0-9_.@:-]*)\s*(?:登录|登陆|访问|打开|进入|login|visit|open)",
+                text,
+                flags=re.IGNORECASE,
+            )
+        ]
 
     def _extract_rpa_target(self, text: str) -> str | None:
         match = re.search(r"(?<![0-9.])\d{2,3}(?:\.\d{1,3}){1,3}(?![0-9.])", text)
@@ -300,6 +355,7 @@ class IntentParser:
     def _extract_workflow_fields(self, text: str) -> dict[str, str]:
         fields: dict[str, str] = {}
         username_patterns = (
+            r"(?:登录名称|登录名|登陆名称|登陆名|login name|login_name|login)\s*(?:字段)?(?:中)?\s*(?:填入|输入|填写|为|叫|是|:|：)?\s*[\"'“”]?([A-Za-z0-9_.@-]{2,})",
             r"(?:账号|用户|用户名|user|username)\s*(?:为|叫|是|:|：)?\s*([A-Za-z0-9_.@-]{2,})",
             r"(?:创建账号|新建账号|创建用户|新建用户)\s*([A-Za-z0-9_.@-]{2,})",
             r"(?:查询用户|搜索用户|查找用户|search user|find user)\s*([A-Za-z0-9_.@-]{2,})",
@@ -312,14 +368,26 @@ class IntentParser:
         email = re.search(r"[A-Za-z0-9_.+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text)
         if email:
             fields["email"] = email.group(0)
-        department = re.search(r"(?:部门|department)\s*(?:为|是|:|：)?\s*([\w\u4e00-\u9fff-]{2,})", text, flags=re.IGNORECASE)
+        department = re.search(
+            r"(?:所属单位编号|所属单位|单位编号|单位|部门|组织|机构|department)\s*"
+            r"(?:字段)?(?:中)?\s*(?:填入|输入|填写|选择|为|是|:|：)?\s*[\"'“”]?"
+            r"([A-Za-z0-9_.\u4e00-\u9fff-]{2,})",
+            text,
+            flags=re.IGNORECASE,
+        )
         if department:
             fields["department"] = department.group(1)
-        display_name = re.search(r"(?:姓名|显示名|display_name|display name)\s*(?:为|是|:|：)?\s*([\w\u4e00-\u9fff.-]{2,})", text, flags=re.IGNORECASE)
+        display_name = re.search(
+            r"(?:用户名称|用户姓名|姓名|显示名|display_name|display name)\s*"
+            r"(?:字段)?(?:中)?\s*(?:填入|输入|填写|为|是|:|：)?\s*[\"'“”]?"
+            r"([A-Za-z0-9_.\u4e00-\u9fff-]{2,})",
+            text,
+            flags=re.IGNORECASE,
+        )
         if display_name:
             fields["display_name"] = display_name.group(1)
         role_patterns = (
-            r"(只读权限|管理员|普通用户|只读|readonly|read-only|admin|viewer)",
+            r"(?<![A-Za-z0-9_.@-])(只读权限|管理员|普通用户|只读|readonly|read-only|admin|viewer)(?![A-Za-z0-9_.@-])",
             r"(?:角色|权限|role|permission)\s*(?:为|是|:|：)?\s*([\w\u4e00-\u9fff.-]{2,})",
         )
         for pattern in role_patterns:

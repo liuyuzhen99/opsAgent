@@ -116,6 +116,47 @@ def test_parser_routes_account_role_request_to_web_action():
     assert result.entities["workflow_fields"]["role"] == "只读权限"
 
 
+def test_parser_extracts_web_login_credential_and_create_user_fields():
+    parser = IntentParser()
+
+    result = parser.parse(
+        "使用ifinance-check-admin登录ifinance，并创建用户：\n"
+        "用户名称：吕婧\n"
+        "登录名称：lvjing_1228\n"
+        "所属单位：101-51011000_内部客户"
+    )
+
+    assert result.intent == "web_action"
+    assert result.entities["credential_ref"] == "ifinance-check-admin"
+    assert result.entities["requires_login"] is True
+    assert result.entities["has_side_effect"] is True
+    assert result.entities["workflow"] == "create_user"
+    assert result.entities["workflow_fields"] == {
+        "username": "lvjing_1228",
+        "display_name": "吕婧",
+        "department": "101-51011000_内部客户",
+    }
+
+
+def test_parser_preserves_credential_sequence_for_compound_web_workflow():
+    parser = IntentParser()
+
+    result = parser.parse(
+        "使用ifinance-check-admin登录ifinance，在用户名称中填入吕婧，在登录名称中填入lvjing_1228，"
+        "所属单位编号中输入“101-230051_内部客户”并保存。之后使用ifinance-init-admin登录ifinance，"
+        "复核所有待复核数据"
+    )
+
+    assert result.intent == "web_action"
+    assert result.entities["credential_ref"] == "ifinance-check-admin"
+    assert result.entities["credential_refs"] == ["ifinance-check-admin", "ifinance-init-admin"]
+    assert result.entities["workflow_fields"] == {
+        "username": "lvjing_1228",
+        "display_name": "吕婧",
+        "department": "101-230051_内部客户",
+    }
+
+
 def test_parser_routes_search_user_request_to_read_workflow():
     parser = IntentParser()
 
@@ -175,6 +216,78 @@ def test_parse_general_chat_with_llm_when_available():
     assert result.intent == "general_chat"
     assert result.entities["raw_text"] == "hello"
     assert result.entities["llm_provider"] == "openai"
+
+
+def test_parse_web_action_with_llm_backfills_credential_ref_from_text():
+    class FakeProvider:
+        def classify_intent(self, text, defaults):
+            return IntentClassification(
+                intent="web_action",
+                entities={"credential_ref": "", "requires_login": True},
+                provider="openai",
+                model="deepseek-chat",
+                request_id=None,
+            )
+
+    parser = IntentParser(llm_provider=FakeProvider())
+
+    result = parser.parse("使用ifinance-check-admin登录ifinance")
+
+    assert result.intent == "web_action"
+    assert result.entities["credential_ref"] == "ifinance-check-admin"
+    assert result.entities["credential_refs"] == ["ifinance-check-admin"]
+    assert result.entities["requires_login"] is True
+
+
+def test_parse_compound_web_action_with_llm_backfills_rule_risk_and_fields():
+    class SparseWebProvider:
+        def classify_intent(self, text, defaults):
+            return IntentClassification(
+                intent="web_action",
+                entities={"steps": ["新增用户", "复核用户"]},
+                provider="openai",
+                model="deepseek-chat",
+                request_id=None,
+            )
+
+    parser = IntentParser(llm_provider=SparseWebProvider())
+
+    result = parser.parse(
+        "使用ifinance-check-admin登录ifinance，在用户名称中填入吕婧，在登录名称中填入lvjing_1228，"
+        "所属单位编号中输入“101-230051_内部客户”并保存。之后使用ifinance-init-admin登录ifinance，"
+        "复核所有待复核数据"
+    )
+
+    assert result.entities["requires_login"] is True
+    assert result.entities["has_side_effect"] is True
+    assert result.entities["credential_refs"] == ["ifinance-check-admin", "ifinance-init-admin"]
+    assert result.entities["workflow_fields"] == {
+        "username": "lvjing_1228",
+        "display_name": "吕婧",
+        "department": "101-230051_内部客户",
+    }
+
+
+def test_llm_rpa_misclassification_is_corrected_for_browser_sidebar_workflow():
+    class MisclassifyingProvider:
+        def classify_intent(self, text, defaults):
+            return IntentClassification(
+                intent="rpa_action",
+                entities={"steps": ["login", "navigate"]},
+                provider="openai",
+                model="deepseek-chat",
+                request_id=None,
+            )
+
+    parser = IntentParser(llm_provider=MisclassifyingProvider())
+    result = parser.parse(
+        "用ifinance-check-admin登录ifinance，在侧边栏依次点击网上银行管理，用户信息管理，"
+        "点击保存，之后使用ifinance-init-admin登录ifinance并点击复核"
+    )
+
+    assert result.intent == "web_action"
+    assert result.entities["has_side_effect"] is True
+    assert result.entities["credential_refs"] == ["ifinance-check-admin", "ifinance-init-admin"]
 
 
 def test_parse_knowledge_write_with_llm_does_not_default_system():

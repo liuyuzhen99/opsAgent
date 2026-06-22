@@ -11,6 +11,7 @@ PARAM_ALIASES = {
     "start_date": ("开始日期", "起始日期", "开始时间", "起始时间", "from", "start", "start_date"),
     "end_date": ("结束日期", "截止日期", "结束时间", "截止时间", "to", "end", "end_date"),
     "username": ("用户名", "登录名", "登录名称", "账号", "用户", "user", "username"),
+    "user_name": ("用户名称", "用户名", "登录名", "登录名称", "账号", "用户", "user", "user_name"),
     "company_name": ("公司", "授权单位", "客户名称", "客户", "企业"),
     "role": ("角色", "权限", "岗位", "role", "permission"),
     "department": ("部门", "department"),
@@ -25,6 +26,9 @@ DATE_PATTERN = r"\d{4}[-/]\d{1,2}[-/]\d{1,2}"
 
 
 class WebSkillRenderer:
+    def render_goal(self, workflow: dict[str, Any], parameters: dict[str, str]) -> str:
+        return self._render_value(workflow.get("goal_template", ""), parameters).strip()
+
     def infer_parameters(self, workflow: dict[str, Any], goal: str, entities: dict[str, Any]) -> dict[str, str]:
         inputs = workflow.get("inputs") or []
         workflow_fields = dict(entities.get("workflow_fields") or {})
@@ -53,7 +57,7 @@ class WebSkillRenderer:
         missing = [
             str(item.get("name"))
             for item in workflow.get("inputs") or []
-            if isinstance(item, dict) and item.get("required", True) and str(item.get("name")) not in parameters
+            if isinstance(item, dict) and item.get("required", True) and not parameters.get(str(item.get("name")))
         ]
         if missing:
             raise WebSkillValidationError("missing required skill parameters: " + ", ".join(missing))
@@ -61,11 +65,17 @@ class WebSkillRenderer:
         for raw_action in self._workflow_actions(workflow):
             if not isinstance(raw_action, dict):
                 continue
+            action_type = str(raw_action.get("type") or "")
+            target_id = self._render_optional(raw_action.get("target_id"), parameters)
+            if target_id and target_id.startswith("aiops-"):
+                target_id = None
             payload = {
-                "type": str(raw_action.get("type") or ""),
+                "type": action_type,
                 "target_hint": self._render_value(raw_action.get("target_hint", ""), parameters),
-                "target_id": self._render_optional(raw_action.get("target_id"), parameters),
-                "value": self._render_optional(raw_action.get("value"), parameters),
+                "target_id": target_id,
+                # Historical skills sometimes captured a concrete answer in finish.value.
+                # Reusing it after parameter substitution would report stale business data.
+                "value": None if action_type == "finish" else self._render_optional(raw_action.get("value"), parameters),
                 "expected_outcome": self._render_value(raw_action.get("expected_outcome", ""), parameters),
                 "risk_level": str(raw_action.get("risk_level") or "safe_read"),
                 "requires_confirmation": bool(raw_action.get("requires_confirmation", False)),
@@ -106,7 +116,9 @@ class WebSkillRenderer:
         for alias in aliases:
             patterns = (
                 rf"{re.escape(alias)}\s*(?:为|是|叫|:|：)\s*([A-Za-z0-9_.@\-]+|[\u4e00-\u9fffA-Za-z0-9_.@\-]{{2,40}})",
-                rf"(?:在|向)\s*{re.escape(alias)}(?:中|里)?\s*(?:输入|填写|填入|选择)\s*[\"“']?([^,，。；;\"”']+)",
+                rf"(?:在|向)\s*{re.escape(alias)}(?:中|里)?"
+                rf"(?:\s*(?:展开|打开)[^,，。；;]{{0,40}}[,，]\s*)?"
+                rf"(?:输入|填写|填入|选择)\s*[\"“']?([^,，。；;\"”']+)",
             )
             for pattern in patterns:
                 match = re.search(pattern, goal, flags=re.IGNORECASE)
@@ -126,6 +138,19 @@ class WebSkillRenderer:
         goal: str,
         date_range: tuple[str, str] | None,
     ) -> str | None:
+        if date_range and name in {"input_value", "input_value_1"}:
+            return date_range[0]
+        if date_range and name == "input_value_2":
+            return date_range[1]
+        if name == "account_no":
+            membership = re.search(
+                r"([A-Za-z0-9][A-Za-z0-9_.:-]*)\s*是否在(?:该用户的)?\s*"
+                r"(?:已分配账户|Assigned Account)(?:列表)?中",
+                goal,
+                re.I,
+            )
+            if membership:
+                return membership.group(1)
         if param_type != "date":
             return None
         if name == "start_date" and date_range:

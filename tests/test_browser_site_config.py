@@ -161,6 +161,57 @@ def test_controller_infers_browser_site_and_credential_from_natural_language():
     assert parsed.entities["allowed_domains"] == ["ifinance.test"]
 
 
+def test_controller_applies_browser_site_from_explicit_credential_mapping():
+    sites = BrowserSitesConfig.model_validate(
+        {
+            "sites": {
+                "ifinance": {
+                    "site_key": "ifinance",
+                    "base_url": "http://ifinance.test",
+                    "login_url": "http://ifinance.test/login",
+                    "allowed_domains": ["ifinance.test"],
+                    "login_fields": {"username": "用户名", "password": "密码", "submit": "登录"},
+                    "workflows": {},
+                }
+            }
+        }
+    )
+    controller = AgentController(
+        parser=IntentParser(),
+        task_manager=None,
+        tool_executor=None,
+        summarizer=None,
+        audit_logger=_FakeAuditLogger(),
+        session_store=None,
+        browser_sites_config=sites,
+        credential_ref_detector=lambda text: "ifinance-check-admin" if "ifinance-check-admin" in text else None,
+        credential_site_resolver=lambda ref: "ifinance" if ref == "ifinance-check-admin" else None,
+    )
+    task = Task(trace_id="trace", input="使用ifinance-check-admin登录系统", id="task", session_id="session")
+
+    state = controller._intent_parse_node(
+        {
+            "task": task,
+            "session": SimpleNamespace(id="session"),
+            "allowed_domains": [],
+            "credential_ref": "",
+            "browser_trace": False,
+            "browser_video": False,
+            "browser_site": "",
+            "browser_channel": "",
+            "browser_slow_mo_ms": 0,
+            "progress_callback": None,
+        }
+    )
+
+    parsed = state["task"]
+    assert parsed.intent == "web_action"
+    assert parsed.entities["credential_ref"] == "ifinance-check-admin"
+    assert parsed.entities["site_key"] == "ifinance"
+    assert parsed.entities["start_url"] == "http://ifinance.test/login"
+    assert parsed.entities["requires_login"] is True
+
+
 def test_controller_alias_overrides_llm_rpa_for_finance_system_login():
     class MisclassifyingProvider:
         def classify_intent(self, text, defaults):

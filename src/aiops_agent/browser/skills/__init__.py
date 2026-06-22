@@ -1,4 +1,5 @@
 from aiops_agent.browser.skills.generator import WebSkillGenerator
+from aiops_agent.browser.skills.invocation import WebSkillInvocation, WebSkillInvocationService
 from aiops_agent.browser.skills.matcher import WebSkillMatcher
 from aiops_agent.browser.skills.models import (
     WebSkill,
@@ -13,6 +14,8 @@ __all__ = [
     "WebSkill",
     "WebSkillGenerationError",
     "WebSkillGenerator",
+    "WebSkillInvocation",
+    "WebSkillInvocationService",
     "WebSkillMatch",
     "WebSkillMatcher",
     "WebSkillSaveResult",

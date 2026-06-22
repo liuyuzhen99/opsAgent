@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import shlex
 from collections.abc import Callable
 from dataclasses import dataclass, field
 import sys
@@ -46,7 +47,9 @@ class ChatRunner:
     def run(self) -> int:
         self._print(
             "进入 opsAgent chat 模式。输入 /exit 退出，/session 查看会话，/new 开启新会话，"
-            "/save-note 保存上一条输入，/note 进入多行记录，/save-skill 保存最近成功 web_action。"
+            "/skills 查看 web skill，/skill 执行 web skill，/save-note 保存上一条输入，"
+            "/note 进入多行记录，/save-skill 保存最近成功 web_action，/rename-skill 改名，"
+            "/delete-skill 删除 web skill。"
         )
         while True:
             try:
@@ -81,6 +84,23 @@ class ChatRunner:
                 name = text.split(maxsplit=1)[1].strip() if " " in text else None
                 self._save_skill(name or None)
                 continue
+            if text == "/rename-skill" or text.startswith("/rename-skill "):
+                self._rename_skill_command(text)
+                continue
+            if (
+                text == "/delete-skill"
+                or text.startswith("/delete-skill ")
+                or text == "/remove-skill"
+                or text.startswith("/remove-skill ")
+            ):
+                self._delete_skill_command(text)
+                continue
+            if text == "/skills":
+                self._show_skills()
+                continue
+            if text == "/skill" or text.startswith("/skill "):
+                self._run_skill_command(text)
+                continue
             if text == "/save-note" or text.startswith("/save-note "):
                 save_note_command = True
                 if " " in text:
@@ -113,17 +133,17 @@ class ChatRunner:
             "browser_channel": self.options.browser_channel,
             "browser_slow_mo_ms": self.options.browser_slow_mo_ms,
         }
-        if hasattr(self.controller, "stream_run"):
-            task_id: str | None = None
-            for event in self.controller.stream_run(text, **kwargs):
-                if event.task_id:
-                    task_id = event.task_id
-                self._print_progress(event)
-            task = self._load_task(task_id)
-            if task is None:
-                raise RuntimeError(f"任务流结束但无法加载任务: {task_id or '-'}")
-            return task
-        return self.controller.run(text, progress_callback=self._print_progress, **kwargs)
+        if hasattr(self.controller, "run"):
+            return self.controller.run(text, progress_callback=self._print_progress, **kwargs)
+        task_id: str | None = None
+        for event in self.controller.stream_run(text, **kwargs):
+            if event.task_id:
+                task_id = event.task_id
+            self._print_progress(event)
+        task = self._load_task(task_id)
+        if task is None:
+            raise RuntimeError(f"任务流结束但无法加载任务: {task_id or '-'}")
+        return task
 
     def _load_task(self, task_id: str | None) -> Task | None:
         if not task_id:
@@ -218,6 +238,189 @@ class ChatRunner:
                     f"- {item.get('field_hint') or '-'}={item.get('original_value')} "
                     f"confidence={item.get('confidence')}"
                 )
+
+    def _delete_skill_command(self, text: str) -> None:
+        try:
+            parts = shlex.split(text)
+        except ValueError as exc:
+            self._print(f"解析删除 skill 命令失败: {exc}")
+            return
+        if any(part in {"--help", "-h"} for part in parts[1:]):
+            self._print("用法: /delete-skill <skill-name> [--yes]")
+            return
+        unknown_options = [part for part in parts[1:] if part.startswith("-") and part != "--yes"]
+        if unknown_options:
+            self._print(f"未知选项: {', '.join(unknown_options)}")
+            self._print("用法: /delete-skill <skill-name> [--yes]")
+            return
+        yes = "--yes" in parts
+        names = [part for part in parts[1:] if part != "--yes"]
+        if len(names) != 1:
+            self._print("用法: /delete-skill <skill-name> [--yes]")
+            return
+        name = names[0]
+        if not yes:
+            answer = self._read_input(f"确认删除 skill {name}? 输入 yes 确认: ").strip().lower()
+            if answer not in {"yes", "y"}:
+                self._print("已取消删除。")
+                return
+        try:
+            path = self.controller.delete_web_skill(name)
+        except (AttributeError, ValueError) as exc:
+            self._print(f"删除 skill 失败: {exc}")
+            return
+        self._print(f"已删除 skill: {name} ({path})")
+
+    def _rename_skill_command(self, text: str) -> None:
+        try:
+            parts = shlex.split(text)
+        except ValueError as exc:
+            self._print(f"解析 skill 改名命令失败: {exc}")
+            return
+        if any(part in {"--help", "-h"} for part in parts[1:]):
+            self._print("用法: /rename-skill <old-name> <new-name>")
+            return
+        if len(parts) != 3:
+            self._print("用法: /rename-skill <old-name> <new-name>")
+            return
+        old_name, new_name = parts[1:]
+        try:
+            path = self.controller.rename_web_skill(old_name, new_name)
+        except (AttributeError, ValueError) as exc:
+            self._print(f"skill 改名失败: {exc}")
+            return
+        self._print(f"已将 skill {old_name} 改名为 {new_name} ({path})")
+
+    def _show_skills(self) -> None:
+        try:
+            skills = self.controller.list_web_skills()
+        except (AttributeError, ValueError) as exc:
+            self._print(f"读取 skill 失败: {exc}")
+            return
+        if not skills:
+            self._print("当前没有可用 web skill。")
+            return
+        self._print("可用 web skill:")
+        for skill in skills:
+            inputs = skill.get("inputs") or []
+            runtime_inputs = skill.get("runtime_inputs") or []
+            required = [item.get("name") for item in inputs if item.get("required", True)]
+            required.extend(item.get("name") for item in runtime_inputs if item.get("required", True))
+            site = skill.get("site_key") or "-"
+            input_summary = self._input_summary(inputs)
+            runtime_summary = self._input_summary(runtime_inputs)
+            self._print(
+                f"- {skill.get('name')} site={site} required={', '.join(required) or '-'} "
+                f"inputs={input_summary} runtime={runtime_summary} "
+                f"{skill.get('description') or ''}".rstrip()
+            )
+
+    def _run_skill_command(self, text: str) -> None:
+        try:
+            parts = shlex.split(text)
+        except ValueError as exc:
+            self._print(f"解析 skill 命令失败: {exc}")
+            return
+        if len(parts) < 2:
+            self._print("用法: /skill <skill-name> key=value ...")
+            return
+        skill_name = parts[1]
+        if len(parts) == 3 and parts[2] == "--help":
+            self._show_skill_help(skill_name)
+            return
+        parameters: dict[str, str] = {}
+        for token in parts[2:]:
+            if token == "--help":
+                self._show_skill_help(skill_name)
+                return
+            if "=" not in token:
+                self._print(f"参数格式错误: {token}，应为 key=value。")
+                return
+            key, value = token.split("=", 1)
+            key = key.strip()
+            if not key:
+                self._print(f"参数格式错误: {token}，key 不能为空。")
+                return
+            parameters[key] = value
+        try:
+            task = self.controller.run_web_skill(
+                skill_name,
+                parameters,
+                session_id=self.current_session_id,
+                llm_profile=self.options.llm_profile,
+                max_steps=self.options.max_steps,
+                require_confirmation=self.options.require_confirmation,
+                allowed_domains=self.options.allowed_domains,
+                credential_ref=self.options.credential_ref,
+                browser_trace=self.options.browser_trace,
+                browser_video=self.options.browser_video,
+                browser_site=self.options.browser_site,
+                browser_channel=self.options.browser_channel,
+                browser_slow_mo_ms=self.options.browser_slow_mo_ms,
+                progress_callback=self._print_progress,
+            )
+        except (AttributeError, ValueError) as exc:
+            self._print(f"执行 skill 失败: {exc}")
+            return
+        self.current_session_id = task.session_id or self.current_session_id
+        self._print_task_result(task)
+        if task.status == "awaiting_confirmation":
+            self._handle_confirmation(task)
+
+    def _show_skill_help(self, skill_name: str) -> None:
+        try:
+            skills = self.controller.list_web_skills()
+        except (AttributeError, ValueError) as exc:
+            self._print(f"读取 skill 失败: {exc}")
+            return
+        skill = next((item for item in skills if item.get("name") == skill_name), None)
+        if skill is None:
+            self._print(f"skill 不存在: {skill_name}")
+            return
+        self._print(f"{skill.get('name')}: {skill.get('description') or '-'}")
+        self._print(f"site_key: {skill.get('site_key') or '-'}")
+        inputs = skill.get("inputs") or []
+        if not inputs:
+            self._print("inputs: -")
+        else:
+            self._print("inputs:")
+            self._print_input_items(inputs)
+        runtime_inputs = skill.get("runtime_inputs") or []
+        if runtime_inputs:
+            self._print("runtime inputs:")
+            self._print_input_items(runtime_inputs)
+
+    def _print_input_items(self, inputs: list[dict]) -> None:
+        for item in inputs:
+            required = "required" if item.get("required", True) else "optional"
+            examples = item.get("examples") or []
+            example_text = f" examples={', '.join(examples)}" if examples else ""
+            default = item.get("default")
+            default_text = f" default={default}" if default else ""
+            description = item.get("description")
+            description_text = f" - {description}" if description else ""
+            self._print(
+                f"- {item.get('name')} ({required}, {item.get('type') or 'text'})"
+                f"{example_text}{default_text}{description_text}"
+            )
+
+    def _input_summary(self, inputs: list[dict]) -> str:
+        if not inputs:
+            return "-"
+        parts: list[str] = []
+        for item in inputs:
+            name = str(item.get("name") or "")
+            if not name:
+                continue
+            default = item.get("default")
+            required = bool(item.get("required", True))
+            if default:
+                parts.append(f"{name}={default}")
+            elif required:
+                parts.append(f"{name}*")
+            else:
+                parts.append(name)
+        return ", ".join(parts) or "-"
 
     def _print_progress(self, event: ProgressEvent) -> None:
         self._print(f"[{event.stage}] {event.message}")

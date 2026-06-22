@@ -292,10 +292,14 @@ def create_controller(
         summarizer=ResultSummarizer(),
         audit_logger=audit_logger,
         session_store=session_store,
-        planning_service=PlanningService(),
+        planning_service=PlanningService(web_skill_matcher=web_skill_matcher),
         browser_sites_config=browser_sites_config,
         web_skill_generator=web_skill_generator,
         credential_ref_resolver=credential_store.default_ref_for_site,
+        credential_ref_detector=credential_store.ref_from_text,
+        credential_user_resolver=credential_store.default_user_for_site,
+        credential_ref_for_site_user=credential_store.ref_for_site_user,
+        credential_site_resolver=credential_store.site_key_for_ref,
         session_summary_strategy=session_summary_strategy,
         logger=get_logger(__name__),
     )
@@ -321,16 +325,7 @@ def build_session_summary_strategy(llm_config, provider):
 
 
 def run_controller_stream(controller: AgentController, task_input: str, **kwargs):
-    task_id: str | None = None
-    for event in controller.stream_run(task_input, **kwargs):
-        if event.task_id:
-            task_id = event.task_id
-    if not task_id:
-        raise RuntimeError("任务流结束但没有产生 task_id")
-    task = controller.task_manager.load(task_id)
-    if task is None:
-        raise RuntimeError(f"任务流结束但无法加载任务: {task_id}")
-    return task
+    return controller.run(task_input, **kwargs)
 
 
 def main(argv: list[str] | None = None) -> int:

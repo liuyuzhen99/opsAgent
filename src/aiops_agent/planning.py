@@ -210,6 +210,7 @@ class PlanningService:
                 "forbidden_actions": ["绕过验证码/MFA", "访问非允许域名", "未确认执行远端写入"],
                 "allowed_domains": allowed_domains,
                 "credential_ref": entities.get("credential_ref"),
+                "credential_refs": list(entities.get("credential_refs") or []),
                 "requires_login": bool(entities.get("requires_login")),
                 "requires_remote_mutation": has_side_effect,
                 "auto_plan": True,

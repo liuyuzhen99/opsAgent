@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -73,3 +74,56 @@ class WebSkillStore:
         )
         (references_dir / "notes.md").write_text(notes.strip() + "\n", encoding="utf-8")
         return skill_root
+
+    def delete(self, name: str) -> Path:
+        skill_name = validate_skill_name(name)
+        skill_root = self.root / skill_name
+        if not skill_root.exists():
+            raise WebSkillValidationError(f"skill not found: {skill_name}")
+        if not skill_root.is_dir():
+            raise WebSkillValidationError(f"skill path is not a directory: {skill_name}")
+        shutil.rmtree(skill_root)
+        return skill_root
+
+    def rename(self, old_name: str, new_name: str) -> Path:
+        source_name = validate_skill_name(old_name)
+        target_name = validate_skill_name(new_name)
+        if source_name == target_name:
+            raise WebSkillValidationError("new skill name must be different from the current name")
+
+        skill = self.load(source_name)
+        source_root = self.root / source_name
+        target_root = self.root / target_name
+        if target_root.exists():
+            raise WebSkillValidationError(f"skill already exists: {target_name}")
+
+        frontmatter = dict(skill.frontmatter)
+        frontmatter["name"] = target_name
+        workflow = json.loads(json.dumps(skill.workflow, ensure_ascii=False))
+        workflow["skill_name"] = target_name
+        validate_frontmatter(frontmatter, target_name)
+        validate_workflow(workflow, target_name)
+
+        try:
+            shutil.copytree(source_root, target_root)
+            frontmatter_text = yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False).strip()
+            (target_root / "SKILL.md").write_text(
+                f"---\n{frontmatter_text}\n---\n\n{skill.body.strip()}\n",
+                encoding="utf-8",
+            )
+            (target_root / "assets" / "workflow.json").write_text(
+                json.dumps(workflow, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            self.load(target_name)
+        except Exception:
+            if target_root.exists():
+                shutil.rmtree(target_root)
+            raise
+
+        try:
+            shutil.rmtree(source_root)
+        except Exception:
+            shutil.rmtree(target_root)
+            raise
+        return target_root

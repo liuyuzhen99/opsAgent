@@ -1,4 +1,5 @@
 import json
+import threading
 
 from aiops_agent.audit.logger import FileAuditLogger
 from aiops_agent.browser.agent import BrowserAgentTool
@@ -44,6 +45,37 @@ class ConfirmationFakeBrowser:
     def close(self):
         ConfirmationFakeBrowser.close_calls += 1
         self.save_session_state()
+
+
+class ThreadBoundConfirmationFakeBrowser(ConfirmationFakeBrowser):
+    thread_ids = []
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.owner_thread_id = threading.get_ident()
+        ThreadBoundConfirmationFakeBrowser.thread_ids.append(self.owner_thread_id)
+
+    def _assert_owner_thread(self):
+        current_thread_id = threading.get_ident()
+        ThreadBoundConfirmationFakeBrowser.thread_ids.append(current_thread_id)
+        if current_thread_id != self.owner_thread_id:
+            raise RuntimeError("Playwright browser used from a different thread")
+
+    def execute(self, action):
+        self._assert_owner_thread()
+        return super().execute(action)
+
+    def observe(self, *, last_action_result="", force_artifact=False):
+        self._assert_owner_thread()
+        return super().observe(last_action_result=last_action_result, force_artifact=force_artifact)
+
+    def save_session_state(self):
+        self._assert_owner_thread()
+        return super().save_session_state()
+
+    def close(self):
+        self._assert_owner_thread()
+        return super().close()
 
 
 def test_browser_agent_records_session_state_path_for_same_session(tmp_path, monkeypatch):
@@ -99,7 +131,9 @@ def test_controller_confirm_resumes_pending_browser_action(tmp_path, monkeypatch
     assert ConfirmationFakeBrowser.instance_count == 1
     assert ConfirmationFakeBrowser.close_calls == 0
 
-    resumed = controller.confirm(task.id)
+    resume_events = []
+    prior_step_count = len(task.result["data"]["steps"])
+    resumed = controller.confirm(task.id, progress_callback=resume_events.append)
 
     assert resumed.status == "success"
     assert ConfirmationFakeBrowser.instance_count == 1
@@ -112,8 +146,38 @@ def test_controller_confirm_resumes_pending_browser_action(tmp_path, monkeypatch
     assert not resumed_state.interrupts
     resumed_web_state = controller.get_web_state(task.id)
     assert not resumed_web_state.interrupts
+    resumed_step_indexes = [
+        event.details.get("step_index")
+        for event in resume_events
+        if event.stage == "web.action.executed"
+    ]
+    assert resumed_step_indexes
+    assert all(index > prior_step_count for index in resumed_step_indexes)
     saved_task = json.loads((tmp_path / "storage" / "tasks" / f"{task.id}.json").read_text(encoding="utf-8"))
     assert saved_task["status"] == "success"
+
+
+def test_controller_confirm_keeps_live_browser_on_original_thread(tmp_path, monkeypatch):
+    ConfirmationFakeBrowser.instance_count = 0
+    ConfirmationFakeBrowser.close_calls = 0
+    ThreadBoundConfirmationFakeBrowser.thread_ids = []
+    monkeypatch.setattr("aiops_agent.browser.agent.PlaywrightBrowserTool", ThreadBoundConfirmationFakeBrowser)
+    config_path = tmp_path / "rpa.json"
+    llm_config_path = tmp_path / "llm.json"
+    _write_rpa_config(config_path)
+    _write_llm_config(llm_config_path, enabled=False)
+    monkeypatch.chdir(tmp_path)
+
+    controller = create_controller(str(config_path), str(llm_config_path))
+    task = controller.run("请打开 http://example.test/form 并保存权限设置")
+
+    assert task.status == "awaiting_confirmation"
+
+    resumed = controller.confirm(task.id)
+
+    assert resumed.status == "success"
+    assert ConfirmationFakeBrowser.instance_count == 1
+    assert len(set(ThreadBoundConfirmationFakeBrowser.thread_ids)) == 1
 
 
 def test_controller_confirm_crash_resumes_web_subgraph_from_checkpoint(tmp_path, monkeypatch):

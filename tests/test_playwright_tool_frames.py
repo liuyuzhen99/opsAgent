@@ -2,7 +2,7 @@ from urllib.parse import quote
 
 import pytest
 
-from aiops_agent.browser.models import BrowserAction
+from aiops_agent.browser.models import BrowserAction, InteractiveElement
 from aiops_agent.browser.playwright_tool import PlaywrightBrowserTool
 
 
@@ -38,6 +38,22 @@ class _FakePage:
     frames = [_FakeFrame()]
 
 
+class _FrameOwner:
+    def __init__(self, visible):
+        self.visible = visible
+
+    def is_visible(self):
+        return self.visible
+
+
+class _OwnedFrame:
+    def __init__(self, visible):
+        self.visible = visible
+
+    def frame_element(self):
+        return _FrameOwner(self.visible)
+
+
 def test_popup_locator_does_not_claim_unmatched_visible_popup(tmp_path):
     tool = PlaywrightBrowserTool(
         session_id="session",
@@ -49,6 +65,30 @@ def test_popup_locator_does_not_claim_unmatched_visible_popup(tmp_path):
     locator = tool._popup_click_locator(_FakePage(), BrowserAction(type="click", target_hint="查询"))
 
     assert locator is None
+
+
+def test_playwright_tool_ignores_frames_hidden_by_their_parent_iframe(tmp_path):
+    tool = PlaywrightBrowserTool(session_id="session", task_id="task", artifact_root=tmp_path)
+    main_frame = _OwnedFrame(True)
+    page = type("Page", (), {"main_frame": main_frame})()
+
+    assert tool._frame_is_visible(page, main_frame) is True
+    assert tool._frame_is_visible(page, _OwnedFrame(False)) is False
+
+
+def test_playwright_tool_requires_a_complete_login_form_to_classify_login(tmp_path):
+    tool = PlaywrightBrowserTool(session_id="session", task_id="task", artifact_root=tmp_path)
+    user_form = [
+        InteractiveElement(element_id="login-name", role="input", name="登录名称"),
+        InteractiveElement(element_id="password", role="input", input_type="password", name="密码"),
+        InteractiveElement(element_id="save", role="button", text="保存"),
+    ]
+    login_form = user_form + [
+        InteractiveElement(element_id="login", role="a", text="登录"),
+    ]
+
+    assert tool._classify_page(user_form, []) == "form"
+    assert tool._classify_page(login_form, []) == "login"
 
 
 def test_playwright_tool_recognizes_bare_css_selector_hints(tmp_path):
@@ -73,7 +113,89 @@ def test_command_hints_are_recognized_for_semantic_lookup(tmp_path):
     )
 
     assert tool._is_command_hint("查询") is True
+    assert tool._is_command_hint("财司系统") is True
     assert tool._is_command_hint("授权单位") is False
+
+
+def test_playwright_tool_clicks_query_alias_button_before_hidden_text(tmp_path):
+    iframe_html = """
+      <html>
+        <body>
+          <button onclick="document.querySelector('#status').innerText = 'queried'">Query</button>
+          <div id="status"></div>
+        </body>
+      </html>
+    """
+    page_html = f"""
+      <html>
+        <body>
+          <a style="display:none">查询</a>
+          <iframe src="data:text/html;charset=utf-8,{quote(iframe_html)}"></iframe>
+        </body>
+      </html>
+    """
+    tool = PlaywrightBrowserTool(
+        session_id="session",
+        task_id="task",
+        artifact_root=tmp_path,
+        headless=True,
+    )
+
+    try:
+        try:
+            tool.execute(BrowserAction(type="open_url", value=f"data:text/html;charset=utf-8,{quote(page_html)}"))
+        except Exception as exc:
+            if "BrowserType.launch" in str(exc) and "Permission denied" in str(exc):
+                pytest.skip("Playwright browser launch is blocked by the local macOS sandbox")
+            raise
+
+        clicked = tool.execute(BrowserAction(type="click", target_hint="查询"))
+
+        assert clicked.status == "success"
+        assert "queried" in clicked.observation.page_text
+    finally:
+        tool.close()
+
+
+def test_playwright_tool_prefers_target_id_over_query_command_alias(tmp_path):
+    page_html = """
+      <html>
+        <body>
+          <button onclick="document.querySelector('#status').innerText = 'toolbar'">Query</button>
+          <button onclick="document.querySelector('#status').innerText = 'filter'">Query</button>
+          <div id="status"></div>
+        </body>
+      </html>
+    """
+    tool = PlaywrightBrowserTool(
+        session_id="session",
+        task_id="task",
+        artifact_root=tmp_path,
+        headless=True,
+    )
+
+    try:
+        try:
+            opened = tool.execute(BrowserAction(type="open_url", value=f"data:text/html;charset=utf-8,{quote(page_html)}"))
+        except Exception as exc:
+            if "BrowserType.launch" in str(exc) and "Permission denied" in str(exc):
+                pytest.skip("Playwright browser launch is blocked by the local macOS sandbox")
+            raise
+        query_buttons = [
+            element
+            for element in opened.observation.interactive_elements
+            if element.text == "Query"
+        ]
+
+        clicked = tool.execute(
+            BrowserAction(type="click", target_hint="查询", target_id=query_buttons[1].element_id)
+        )
+
+        assert clicked.status == "success"
+        assert "filter" in clicked.observation.page_text
+        assert "toolbar" not in clicked.observation.page_text
+    finally:
+        tool.close()
 
 
 def test_playwright_tool_recognizes_date_type_actions(tmp_path):
@@ -152,6 +274,63 @@ def test_playwright_tool_observes_and_interacts_with_iframe_elements(tmp_path):
         tool.close()
 
 
+def test_playwright_tool_type_label_ignores_table_row_checkboxes(tmp_path):
+    iframe_html = """
+      <html>
+        <body>
+          <table>
+            <thead>
+              <tr><th>用户编号</th><th>用户名称</th><th>登录名称</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><input name="ck" type="checkbox" /></td><td>pen_test2</td><td>pen_test2</td></tr>
+            </tbody>
+          </table>
+          <div class="query-form">
+            <span>用户名称</span>
+            <input id="queryUserName" name="userName" />
+          </div>
+          <button onclick="document.body.append(' 查询值 ' + document.querySelector('#queryUserName').value)">确定</button>
+        </body>
+      </html>
+    """
+    page_html = f"""
+      <html>
+        <body>
+          <iframe src="data:text/html;charset=utf-8,{quote(iframe_html)}"></iframe>
+        </body>
+      </html>
+    """
+    tool = PlaywrightBrowserTool(
+        session_id="session",
+        task_id="task",
+        artifact_root=tmp_path,
+        headless=True,
+    )
+
+    try:
+        try:
+            tool.execute(
+                BrowserAction(
+                    type="open_url",
+                    value=f"data:text/html;charset=utf-8,{quote(page_html)}",
+                )
+            )
+        except Exception as exc:
+            if "BrowserType.launch" in str(exc) and "Permission denied" in str(exc):
+                pytest.skip("Playwright browser launch is blocked by the local macOS sandbox")
+            raise
+
+        filled = tool.execute(BrowserAction(type="type", target_hint="用户名称", value="pen_test2"))
+        assert filled.status == "success"
+        clicked = tool.execute(BrowserAction(type="click", target_hint="确定"))
+
+        assert clicked.status == "success"
+        assert "查询值 pen_test2" in clicked.observation.page_text
+    finally:
+        tool.close()
+
+
 def test_playwright_tool_types_into_open_dropdown_search_input(tmp_path):
     page_html = """
       <html>
@@ -164,7 +343,11 @@ def test_playwright_tool_types_into_open_dropdown_search_input(tmp_path):
             "
           >授权单位</button>
           <div id="dropdown" class="el-select-dropdown" style="display:none">
-            <input id="companySearch" />
+            <input
+              id="companySearch"
+              onkeyup="document.querySelector('#status').innerText = 'keyup ' + this.value"
+            />
+            <div id="status"></div>
           </div>
         </body>
       </html>
@@ -202,6 +385,99 @@ def test_playwright_tool_types_into_open_dropdown_search_input(tmp_path):
 
         assert typed.status == "success"
         assert "内蒙古伊家好奶酪有限责任公司" in typed.observation.page_text
+        assert "keyup 内蒙古伊家好奶酪有限责任公司" in typed.observation.page_text
+    finally:
+        tool.close()
+
+
+def test_playwright_tool_prefers_select2_search_input_over_page_inputs(tmp_path):
+    page_html = """
+      <html>
+        <body>
+          <input id="pageNo" value="1" />
+          <div id="select2-drop" class="select2-drop select2-drop-active" style="display:block">
+            <div class="select2-search">
+              <input
+                id="agencySearch"
+                class="select2-input"
+                onkeyup="document.querySelector('#status').innerText = 'search ' + this.value"
+              />
+            </div>
+            <ul class="select2-results">
+              <li class="select2-result-selectable"><div class="select2-result-label">101-51013200_内部客户</div></li>
+            </ul>
+          </div>
+          <div id="status"></div>
+        </body>
+      </html>
+    """
+    tool = PlaywrightBrowserTool(
+        session_id="session",
+        task_id="task",
+        artifact_root=tmp_path,
+        headless=True,
+    )
+
+    try:
+        try:
+            tool.execute(BrowserAction(type="open_url", value=f"data:text/html;charset=utf-8,{quote(page_html)}"))
+        except Exception as exc:
+            if "BrowserType.launch" in str(exc) and "Permission denied" in str(exc):
+                pytest.skip("Playwright browser launch is blocked by the local macOS sandbox")
+            raise
+
+        typed = tool.execute(
+            BrowserAction(type="type", target_hint="授权单位搜索输入框", value="101-51013200_内部客户")
+        )
+
+        assert typed.status == "success"
+        assert tool._page.locator("#agencySearch").input_value() == "101-51013200_内部客户"
+        assert tool._page.locator("#pageNo").input_value() == "1"
+        assert "search 101-51013200_内部客户" in typed.observation.page_text
+    finally:
+        tool.close()
+
+
+def test_playwright_tool_clicks_authorized_agency_select2_choice(tmp_path):
+    page_html = """
+      <html>
+        <body>
+          <span>Authorized Agency</span>
+          <div id="s2id_agency">
+            <a
+              class="select2-choice"
+              href="javascript:void(0)"
+              onclick="document.querySelector('#dropdown').style.display = 'block'"
+            >101-130017_内部客户</a>
+          </div>
+          <div id="dropdown" class="select2-drop" style="display:none">opened</div>
+        </body>
+      </html>
+    """
+    tool = PlaywrightBrowserTool(
+        session_id="session",
+        task_id="task",
+        artifact_root=tmp_path,
+        headless=True,
+    )
+
+    try:
+        try:
+            tool.execute(
+                BrowserAction(
+                    type="open_url",
+                    value=f"data:text/html;charset=utf-8,{quote(page_html)}",
+                )
+            )
+        except Exception as exc:
+            if "BrowserType.launch" in str(exc) and "Permission denied" in str(exc):
+                pytest.skip("Playwright browser launch is blocked by the local macOS sandbox")
+            raise
+
+        opened = tool.execute(BrowserAction(type="click", target_hint="Authorized Agency"))
+
+        assert opened.status == "success"
+        assert "opened" in opened.observation.page_text
     finally:
         tool.close()
 
